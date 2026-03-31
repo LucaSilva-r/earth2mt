@@ -2,11 +2,201 @@
 """CLI entry point for earth2mt - Earth terrain to Luanti world generator."""
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import hashlib
+import multiprocessing
 import os
 import shutil
 import sys
 import time
+
+
+_WORKER_COORDS = None
+_WORKER_ELEVATION_SRC = None
+_WORKER_LANDCOVER_SRC = None
+_WORKER_CLIMATE_SRC = None
+_WORKER_ORGANIC_CARBON_SRC = None
+_WORKER_SOIL_CLASS_SRC = None
+_WORKER_WORLD_SEED = None
+
+
+def _positive_int(raw_value: str) -> int:
+    """argparse type that only accepts positive integers."""
+    value = int(raw_value)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
+def resolve_jobs(requested_jobs: int | None, total_columns: int) -> int:
+    """Choose a sane worker count for the current world size."""
+    if total_columns <= 1:
+        return 1
+
+    available = os.cpu_count() or 1
+    jobs = available if requested_jobs is None else requested_jobs
+    return max(1, min(jobs, total_columns))
+
+
+def _mapblock_columns(
+    mb_min_x: int,
+    mb_max_x: int,
+    mb_min_z: int,
+    mb_max_z: int,
+):
+    """Yield all mapblock column coordinates in generation order."""
+    for mb_x in range(mb_min_x, mb_max_x + 1):
+        for mb_z in range(mb_min_z, mb_max_z + 1):
+            yield mb_x, mb_z
+
+
+def _set_generation_worker_state(
+    coords,
+    elevation_src,
+    landcover_src,
+    climate_src,
+    organic_carbon_src,
+    soil_class_src,
+    world_seed: int,
+):
+    """Populate process-local generation state used by workers."""
+    global _WORKER_COORDS
+    global _WORKER_ELEVATION_SRC
+    global _WORKER_LANDCOVER_SRC
+    global _WORKER_CLIMATE_SRC
+    global _WORKER_ORGANIC_CARBON_SRC
+    global _WORKER_SOIL_CLASS_SRC
+    global _WORKER_WORLD_SEED
+
+    _WORKER_COORDS = coords
+    _WORKER_ELEVATION_SRC = elevation_src
+    _WORKER_LANDCOVER_SRC = landcover_src
+    _WORKER_CLIMATE_SRC = climate_src
+    _WORKER_ORGANIC_CARBON_SRC = organic_carbon_src
+    _WORKER_SOIL_CLASS_SRC = soil_class_src
+    _WORKER_WORLD_SEED = world_seed
+
+
+def _clear_generation_worker_state():
+    """Release process-local generation state."""
+    global _WORKER_COORDS
+    global _WORKER_ELEVATION_SRC
+    global _WORKER_LANDCOVER_SRC
+    global _WORKER_CLIMATE_SRC
+    global _WORKER_ORGANIC_CARBON_SRC
+    global _WORKER_SOIL_CLASS_SRC
+    global _WORKER_WORLD_SEED
+
+    _WORKER_COORDS = None
+    _WORKER_ELEVATION_SRC = None
+    _WORKER_LANDCOVER_SRC = None
+    _WORKER_CLIMATE_SRC = None
+    _WORKER_ORGANIC_CARBON_SRC = None
+    _WORKER_SOIL_CLASS_SRC = None
+    _WORKER_WORLD_SEED = None
+
+
+def _init_generation_worker(
+    cache_dir: str,
+    center_lat: float,
+    center_lon: float,
+    scale: float,
+    world_seed: int,
+):
+    """Initialize per-process generation state when spawning workers."""
+    if _WORKER_COORDS is not None:
+        return
+
+    from earth2mt.data.climate import ClimateSource
+    from earth2mt.data.elevation import ElevationSource
+    from earth2mt.data.landcover import LandcoverSource
+    from earth2mt.data.soil import OrganicCarbonSource, SoilClassSource
+    from earth2mt.terrain.coords import CoordinateTransform
+
+    _set_generation_worker_state(
+        CoordinateTransform(center_lat, center_lon, scale),
+        ElevationSource(cache_dir, scale),
+        LandcoverSource(cache_dir, scale),
+        ClimateSource(cache_dir),
+        OrganicCarbonSource(cache_dir, scale),
+        SoilClassSource(cache_dir, scale),
+        world_seed,
+    )
+
+
+def _generate_serialized_column(
+    column: tuple[int, int],
+) -> tuple[int, int, list[tuple[int, bytes]]]:
+    """Generate and serialize all non-empty mapblocks for one X/Z column."""
+    if _WORKER_COORDS is None:
+        raise RuntimeError("Generation worker state was not initialized")
+
+    from earth2mt.terrain.surface import generate_mapblock_column
+    from earth2mt.world.mapblock import serialize_mapblock
+
+    mb_x, mb_z = column
+    mapblocks = generate_mapblock_column(
+        mb_x,
+        mb_z,
+        _WORKER_COORDS,
+        _WORKER_ELEVATION_SRC,
+        _WORKER_LANDCOVER_SRC,
+        _WORKER_CLIMATE_SRC,
+        _WORKER_ORGANIC_CARBON_SRC,
+        _WORKER_SOIL_CLASS_SRC,
+        _WORKER_WORLD_SEED,
+    )
+    serialized = [
+        (mb_y, serialize_mapblock(block_data, mb_x, mb_y, mb_z))
+        for mb_y, block_data in mapblocks
+    ]
+    return mb_x, mb_z, serialized
+
+
+def _preferred_mp_context():
+    """Prefer fork so workers can share the large read-only climate raster."""
+    if "fork" in multiprocessing.get_all_start_methods():
+        return multiprocessing.get_context("fork")
+    return multiprocessing.get_context()
+
+
+def _iter_parallel_generated_columns(executor, columns, jobs: int):
+    """Yield serialized columns from a live process pool."""
+    column_iter = iter(columns)
+    max_pending = max(jobs * 2, 1)
+    pending = set()
+
+    while len(pending) < max_pending:
+        try:
+            column = next(column_iter)
+        except StopIteration:
+            break
+        pending.add(executor.submit(_generate_serialized_column, column))
+
+    while pending:
+        done, pending = wait(pending, return_when=FIRST_COMPLETED)
+        for future in done:
+            yield future.result()
+
+            try:
+                column = next(column_iter)
+            except StopIteration:
+                continue
+            pending.add(executor.submit(_generate_serialized_column, column))
+
+
+def _print_progress(done: int, total_columns: int, start_time: float):
+    """Render an in-place generation progress line."""
+    elapsed = time.time() - start_time
+    rate = done / elapsed if elapsed > 0 else 0.0
+    remaining = (total_columns - done) / rate if rate > 0 else 0.0
+    print(
+        f"\r  [{done}/{total_columns}] "
+        f"{done * 100 / total_columns:.1f}% "
+        f"({rate:.1f} col/s, ~{remaining:.0f}s remaining)   ",
+        end="",
+        flush=True,
+    )
 
 
 def _spiral_offsets(max_radius: int):
@@ -184,6 +374,12 @@ def parse_args():
         default=os.path.expanduser("~/.cache/earth2mt"),
         help="Tile cache directory (default: ~/.cache/earth2mt/)",
     )
+    parser.add_argument(
+        "--jobs",
+        type=_positive_int,
+        default=None,
+        help="Worker processes for column generation (default: CPU count)",
+    )
 
     return parser.parse_args()
 
@@ -250,10 +446,8 @@ def main():
     from earth2mt.data.landcover import LandcoverSource
     from earth2mt.data.climate import ClimateSource
     from earth2mt.data.soil import OrganicCarbonSource, SoilClassSource
-    from earth2mt.terrain.surface import generate_mapblock_column
     from earth2mt.world.world_setup import create_world
     from earth2mt.world.world_db import WorldDB
-    from earth2mt.world.mapblock import serialize_mapblock
     from earth2mt.config import MAP_BLOCK_SIZE
 
     # Set up coordinate transform
@@ -273,8 +467,10 @@ def main():
     mb_max_z = max_bz // MAP_BLOCK_SIZE
 
     total_columns = (mb_max_x - mb_min_x + 1) * (mb_max_z - mb_min_z + 1)
+    jobs = resolve_jobs(args.jobs, total_columns)
     print(f"Generating {total_columns} MapBlock columns "
-          f"({mb_max_x - mb_min_x + 1} x {mb_max_z - mb_min_z + 1})...")
+          f"({mb_max_x - mb_min_x + 1} x {mb_max_z - mb_min_z + 1}) "
+          f"using {jobs} worker{'s' if jobs != 1 else ''}...")
 
     # Initialize data sources
     elevation_src = ElevationSource(args.cache_dir, args.scale)
@@ -298,28 +494,32 @@ def main():
     if launch_world is not None:
         print(f"Luanti launch world: {launch_world}")
 
+    _set_generation_worker_state(
+        coords,
+        elevation_src,
+        landcover_src,
+        climate_src,
+        organic_carbon_src,
+        soil_class_src,
+        world_seed,
+    )
+
     # Create world
     create_world(args.output, (spawn_x, spawn_y, spawn_z), world_seed, world_name)
-    db = WorldDB(args.output)
 
     start_time = time.time()
     done = 0
+    columns = _mapblock_columns(mb_min_x, mb_max_x, mb_min_z, mb_max_z)
 
-    try:
-        db.begin()
-        batch_count = 0
+    def write_generated_columns(generated_columns):
+        nonlocal done
+        db = WorldDB(args.output)
+        try:
+            db.begin()
+            batch_count = 0
 
-        for mb_x in range(mb_min_x, mb_max_x + 1):
-            for mb_z in range(mb_min_z, mb_max_z + 1):
-                # Generate all MapBlocks for this column
-                mapblocks = generate_mapblock_column(
-                    mb_x, mb_z, coords,
-                    elevation_src, landcover_src, climate_src,
-                    organic_carbon_src, soil_class_src, world_seed,
-                )
-
-                for mb_y, block_data in mapblocks:
-                    data = serialize_mapblock(block_data, mb_x, mb_y, mb_z)
+            for mb_x, mb_z, mapblocks in generated_columns:
+                for mb_y, data in mapblocks:
                     db.save_block(mb_x, mb_y, mb_z, data)
                     batch_count += 1
 
@@ -329,17 +529,27 @@ def main():
                         batch_count = 0
 
                 done += 1
-                elapsed = time.time() - start_time
-                rate = done / elapsed if elapsed > 0 else 0
-                remaining = (total_columns - done) / rate if rate > 0 else 0
-                print(f"\r  [{done}/{total_columns}] "
-                      f"{done * 100 / total_columns:.1f}% "
-                      f"({rate:.1f} col/s, ~{remaining:.0f}s remaining)   ",
-                      end="", flush=True)
+                _print_progress(done, total_columns, start_time)
 
-        db.end()
+            db.end()
+        finally:
+            db.close()
+
+    try:
+        if jobs == 1:
+            write_generated_columns(_generate_serialized_column(column) for column in columns)
+        else:
+            with ProcessPoolExecutor(
+                max_workers=jobs,
+                mp_context=_preferred_mp_context(),
+                initializer=_init_generation_worker,
+                initargs=(args.cache_dir, lat, lon, args.scale, world_seed),
+            ) as executor:
+                write_generated_columns(
+                    _iter_parallel_generated_columns(executor, columns, jobs)
+                )
     finally:
-        db.close()
+        _clear_generation_worker_state()
 
     if launch_world is not None:
         sync_luanti_launch_world(args.output, launch_world)

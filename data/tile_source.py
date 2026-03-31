@@ -24,7 +24,15 @@ class TileSource:
         data = self._http_get(url)
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(data)
+        tmp_path = cache_path.with_name(
+            f".{cache_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        try:
+            tmp_path.write_bytes(data)
+            os.replace(tmp_path, cache_path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
         return data
 
