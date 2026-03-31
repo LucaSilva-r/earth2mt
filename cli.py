@@ -28,6 +28,14 @@ def _positive_int(raw_value: str) -> int:
     return value
 
 
+def _non_negative_float(raw_value: str) -> float:
+    """argparse type that only accepts floats >= 0."""
+    value = float(raw_value)
+    if value < 0.0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return value
+
+
 def resolve_jobs(requested_jobs: int | None, total_columns: int) -> int:
     """Choose a sane worker count for the current world size."""
     if total_columns <= 1:
@@ -187,9 +195,12 @@ def _iter_parallel_generated_columns(executor, columns, jobs: int):
             pending.add(executor.submit(_generate_serialized_column, column))
 
 
-def _print_progress(done: int, total_columns: int, start_time: float):
+def _print_progress(done: int, total_columns: int, start_time: float, now: float | None = None):
     """Render an in-place generation progress line."""
-    elapsed = time.time() - start_time
+    if now is None:
+        now = time.monotonic()
+
+    elapsed = now - start_time
     rate = done / elapsed if elapsed > 0 else 0.0
     remaining = (total_columns - done) / rate if rate > 0 else 0.0
     print(
@@ -199,6 +210,21 @@ def _print_progress(done: int, total_columns: int, start_time: float):
         end="",
         flush=True,
     )
+
+
+def _should_print_progress(
+    done: int,
+    total_columns: int,
+    last_update_time: float,
+    now: float,
+    progress_interval: float,
+) -> bool:
+    """Decide whether enough time has passed to print another progress update."""
+    if done >= total_columns:
+        return True
+    if progress_interval == 0.0:
+        return True
+    return (now - last_update_time) >= progress_interval
 
 
 def _spiral_offsets(max_radius: int):
@@ -382,6 +408,12 @@ def parse_args():
         default=None,
         help="Worker processes for column generation (default: CPU count)",
     )
+    parser.add_argument(
+        "--progress-interval",
+        type=_non_negative_float,
+        default=1.0,
+        help="Seconds between progress updates (default: 1.0, use 0 for every column)",
+    )
 
     return parser.parse_args()
 
@@ -434,6 +466,7 @@ def main():
     print(f"Radius: {args.radius} blocks")
     print(f"Scale: {args.scale} m/block")
     print(f"Approximate geographic radius: {(args.radius * args.scale) / 1000.0:.3f} km")
+    print(f"Progress interval: {args.progress_interval:.1f}s")
     print(f"Output: {args.output}")
 
     # Check output path
@@ -510,12 +543,14 @@ def main():
     # Create world
     create_world(args.output, (spawn_x, spawn_y, spawn_z), world_seed, world_name)
 
-    start_time = time.time()
+    start_time = time.monotonic()
+    last_progress_update = start_time
     done = 0
     columns = _mapblock_columns(mb_min_x, mb_max_x, mb_min_z, mb_max_z)
 
     def write_generated_columns(generated_columns):
         nonlocal done
+        nonlocal last_progress_update
         db = WorldDB(args.output)
         try:
             db.begin()
@@ -532,7 +567,16 @@ def main():
                         batch_count = 0
 
                 done += 1
-                _print_progress(done, total_columns, start_time)
+                now = time.monotonic()
+                if _should_print_progress(
+                    done,
+                    total_columns,
+                    last_progress_update,
+                    now,
+                    args.progress_interval,
+                ):
+                    _print_progress(done, total_columns, start_time, now=now)
+                    last_progress_update = now
 
             db.end()
         finally:
@@ -557,7 +601,7 @@ def main():
     if launch_world is not None:
         sync_luanti_launch_world(args.output, launch_world)
 
-    elapsed = time.time() - start_time
+    elapsed = time.monotonic() - start_time
     print(f"\nDone in {elapsed:.1f}s. World saved to: {args.output}")
     if launch_world is not None:
         print(f"Open this world in Luanti: {launch_world}")
