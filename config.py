@@ -1,6 +1,6 @@
 """Constants: Mineclonia block names, climate thresholds, tile server config."""
 
-from enum import IntEnum
+from enum import Enum, IntEnum
 
 # === Mineclonia Block Names ===
 
@@ -19,6 +19,13 @@ WATER = "mcl_core:water_source"
 SNOW_BLOCK = "mcl_core:snowblock"
 BEDROCK = "mcl_core:bedrock"
 ICE = "mcl_core:ice"
+TERRACOTTA = "mcl_colorblocks:hardened_clay"
+ORANGE_TERRACOTTA = "mcl_colorblocks:hardened_clay_orange"
+YELLOW_TERRACOTTA = "mcl_colorblocks:hardened_clay_yellow"
+BROWN_TERRACOTTA = "mcl_colorblocks:hardened_clay_brown"
+RED_TERRACOTTA = "mcl_colorblocks:hardened_clay_red"
+WHITE_TERRACOTTA = "mcl_colorblocks:hardened_clay_white"
+LIGHT_GRAY_TERRACOTTA = "mcl_colorblocks:hardened_clay_silver"
 AIR = "air"
 IGNORE = "ignore"
 
@@ -135,12 +142,115 @@ class Cover(IntEnum):
     PERMANENT_SNOW = 220
 
 
+class SoilOrder(Enum):
+    NO = "no"
+    GELISOL = "gelisol"
+    HISTOSOL = "histosol"
+    SPODOSOL = "spodosol"
+    ANDISOL = "andisol"
+    OXISOL = "oxisol"
+    VERTISOL = "vertisol"
+    ARIDISOL = "aridisol"
+    ULTISOL = "ultisol"
+    MOLLISOL = "mollisol"
+    ALFISOL = "alfisol"
+    INCEPTISOL = "inceptisol"
+    ENTISOL = "entisol"
+
+
+class SoilSuborder(Enum):
+    NO = (255, SoilOrder.NO)
+    OCEAN = (0, SoilOrder.NO)
+    SHIFTING_SAND = (1, SoilOrder.NO)
+    ROCK = (2, SoilOrder.NO)
+    ICE = (3, SoilOrder.NO)
+    HISTELS = (5, SoilOrder.GELISOL)
+    TURBELS = (6, SoilOrder.GELISOL)
+    ORTHELS = (7, SoilOrder.GELISOL)
+    FOLISTS = (10, SoilOrder.HISTOSOL)
+    FIBRISTS = (11, SoilOrder.HISTOSOL)
+    HEMISTS = (12, SoilOrder.HISTOSOL)
+    SAPRISTS = (13, SoilOrder.HISTOSOL)
+    AQUODS = (15, SoilOrder.SPODOSOL)
+    CRYODS = (16, SoilOrder.SPODOSOL)
+    HUMODS = (17, SoilOrder.SPODOSOL)
+    ORTHODS = (18, SoilOrder.SPODOSOL)
+    GELODS = (19, SoilOrder.SPODOSOL)
+    AQUANDS = (20, SoilOrder.ANDISOL)
+    CRYANDS = (21, SoilOrder.ANDISOL)
+    TORRANDS = (22, SoilOrder.ANDISOL)
+    XERANDS = (23, SoilOrder.ANDISOL)
+    VITRANDS = (24, SoilOrder.ANDISOL)
+    USTANDS = (25, SoilOrder.ANDISOL)
+    UDANDS = (26, SoilOrder.ANDISOL)
+    GELANDS = (27, SoilOrder.ANDISOL)
+    AQUOX = (30, SoilOrder.OXISOL)
+    TORROX = (31, SoilOrder.OXISOL)
+    USTOX = (32, SoilOrder.OXISOL)
+    PEROX = (33, SoilOrder.OXISOL)
+    UDOX = (34, SoilOrder.OXISOL)
+    AQUERTS = (40, SoilOrder.VERTISOL)
+    CRYERTS = (41, SoilOrder.VERTISOL)
+    XERERTS = (42, SoilOrder.VERTISOL)
+    TORRERTS = (43, SoilOrder.VERTISOL)
+    USTERTS = (44, SoilOrder.VERTISOL)
+    UDERTS = (45, SoilOrder.VERTISOL)
+    CRYIDS = (50, SoilOrder.ARIDISOL)
+    SALIDS = (51, SoilOrder.ARIDISOL)
+    DURIDS = (52, SoilOrder.ARIDISOL)
+    GYPSIDS = (53, SoilOrder.ARIDISOL)
+    ARGIDS = (54, SoilOrder.ARIDISOL)
+    CALCIDS = (55, SoilOrder.ARIDISOL)
+    CAMBIDS = (56, SoilOrder.ARIDISOL)
+    AQUULTS = (60, SoilOrder.ULTISOL)
+    HUMULTS = (61, SoilOrder.ULTISOL)
+    UDULTS = (62, SoilOrder.ULTISOL)
+    USTULTS = (63, SoilOrder.ULTISOL)
+    XERULTS = (64, SoilOrder.ULTISOL)
+    BOROLLS = (69, SoilOrder.MOLLISOL)
+    ALBOLLS = (70, SoilOrder.MOLLISOL)
+    AQUOLLS = (71, SoilOrder.MOLLISOL)
+    RENDOLLS = (72, SoilOrder.MOLLISOL)
+    XEROLLS = (73, SoilOrder.MOLLISOL)
+    CRYOLLS = (74, SoilOrder.MOLLISOL)
+    USTOLLS = (75, SoilOrder.MOLLISOL)
+    UDOLLS = (76, SoilOrder.MOLLISOL)
+    GELOLLS = (77, SoilOrder.ALFISOL)
+    AQUALFS = (80, SoilOrder.ALFISOL)
+    CRYALFS = (81, SoilOrder.ALFISOL)
+    USTALFS = (82, SoilOrder.ALFISOL)
+    XERALFS = (83, SoilOrder.ALFISOL)
+    UDALFS = (84, SoilOrder.ALFISOL)
+    UDEPTS = (85, SoilOrder.INCEPTISOL)
+    GELEPTS = (86, SoilOrder.INCEPTISOL)
+    OCHREPTS = (89, SoilOrder.INCEPTISOL)
+    AQUEPTS = (90, SoilOrder.INCEPTISOL)
+    ANTHREPTS = (91, SoilOrder.INCEPTISOL)
+    CRYEPTS = (92, SoilOrder.INCEPTISOL)
+    USTEPTS = (93, SoilOrder.INCEPTISOL)
+    XEREPTS = (94, SoilOrder.INCEPTISOL)
+    AQUENTS = (95, SoilOrder.ENTISOL)
+    ARENTS = (96, SoilOrder.ENTISOL)
+    PSAMMENTS = (97, SoilOrder.ENTISOL)
+    FLUVENTS = (98, SoilOrder.ENTISOL)
+    ORTHENTS = (99, SoilOrder.ENTISOL)
+
+    def __init__(self, sid: int, order: SoilOrder):
+        self.id = sid
+        self.order = order
+
+
 # Lookup table: cover ID (0-255) -> Cover enum
 _COVER_BY_ID = {c.value: c for c in Cover}
+_SOIL_SUBORDER_BY_ID = {soil.id: soil for soil in SoilSuborder}
 
 
 def cover_by_id(cid: int) -> Cover:
     return _COVER_BY_ID.get(cid, Cover.NO)
+
+
+def soil_suborder_by_id(sid: int) -> SoilSuborder:
+    return _SOIL_SUBORDER_BY_ID.get(sid, SoilSuborder.NO)
 
 
 # Sets of cover types for classification
@@ -170,6 +280,10 @@ FLOODED_COVERS = frozenset({
 
 BARREN_COVERS = frozenset({
     Cover.BARE, Cover.BARE_CONSOLIDATED, Cover.BARE_UNCONSOLIDATED,
+})
+
+CONSOLIDATED_COVERS = frozenset({
+    Cover.BARE_CONSOLIDATED,
 })
 
 NEEDLEAF_COVERS = frozenset({

@@ -5,15 +5,21 @@ import numpy as np
 from earth2mt.config import (
     MAP_BLOCK_SIZE, NODES_PER_BLOCK,
     SEA_LEVEL, WORLD_FLOOR,
-    STONE, WATER, AIR, IGNORE,
-    Biome,
+    STONE, WATER, AIR,
+    Biome, Landform,
 )
 from earth2mt.terrain.coords import CoordinateTransform
-from earth2mt.terrain.biome import classify_biome
-from earth2mt.terrain.soil import select_surface_blocks, soil_depth
+from earth2mt.terrain.biome import classify_biome, determine_landform
+from earth2mt.terrain.soil import (
+    GrowthPredictors,
+    compute_slope,
+    sample_soil_profile,
+    select_soil_texture,
+)
 from earth2mt.data.elevation import ElevationSource
 from earth2mt.data.landcover import LandcoverSource
 from earth2mt.data.climate import ClimateSource
+from earth2mt.data.soil import OrganicCarbonSource, SoilClassSource
 
 
 def generate_mapblock_column(
@@ -23,6 +29,9 @@ def generate_mapblock_column(
     elevation_src: ElevationSource,
     landcover_src: LandcoverSource,
     climate_src: ClimateSource,
+    organic_carbon_src: OrganicCarbonSource,
+    soil_class_src: SoilClassSource,
+    world_seed: int,
 ) -> list[tuple[int, "MapBlockData"]]:
     """Generate all MapBlocks for a single (mb_x, mb_z) column.
 
@@ -34,12 +43,16 @@ def generate_mapblock_column(
 
     # Per-column data arrays
     heights = np.zeros((MAP_BLOCK_SIZE, MAP_BLOCK_SIZE), dtype=np.int32)
-    biomes = np.zeros((MAP_BLOCK_SIZE, MAP_BLOCK_SIZE), dtype=np.int32)
-    top_blocks = [[None] * MAP_BLOCK_SIZE for _ in range(MAP_BLOCK_SIZE)]
-    sub_blocks = [[None] * MAP_BLOCK_SIZE for _ in range(MAP_BLOCK_SIZE)]
-    depths = np.zeros((MAP_BLOCK_SIZE, MAP_BLOCK_SIZE), dtype=np.int32)
+    soil_profiles = [[[] for _ in range(MAP_BLOCK_SIZE)] for _ in range(MAP_BLOCK_SIZE)]
 
-    min_height = 9999
+    elevations = elevation_src.sample_region(
+        coords,
+        base_bx - 1,
+        base_bz - 1,
+        MAP_BLOCK_SIZE + 2,
+        MAP_BLOCK_SIZE + 2,
+    )
+
     max_height = -9999
 
     for dz in range(MAP_BLOCK_SIZE):
@@ -49,25 +62,41 @@ def generate_mapblock_column(
 
             # Sample geographic data
             lat, lon = coords.block_to_geo(bx, bz)
-            elev = elevation_src.sample(coords, bx, bz)
+            elev = float(elevations[dz + 1, dx + 1])
             cover = landcover_src.sample(coords, bx, bz)
             mean_temp, min_temp, rainfall = climate_src.sample(lat, lon)
+            organic_carbon = organic_carbon_src.sample(coords, bx, bz)
+            soil_suborder = soil_class_src.sample(coords, bx, bz)
+            slope = compute_slope(elevations, dx + 1, dz + 1, 1.0 / coords.scale)
 
             # Classify biome
             biome = classify_biome(elev, cover, mean_temp, min_temp, rainfall)
+            landform = determine_landform(cover, elev)
+            if biome in (Biome.BEACH, Biome.COLD_BEACH):
+                landform = Landform.BEACH
 
             # Terrain height in blocks, using the same meters-per-block scale on Y.
             terrain_h = coords.elevation_to_world_y(elev, SEA_LEVEL)
             heights[dz, dx] = terrain_h
-            biomes[dz, dx] = biome
 
-            # Surface blocks
-            top, sub = select_surface_blocks(biome, bx, bz)
-            top_blocks[dz][dx] = top
-            sub_blocks[dz][dx] = sub
-            depths[dz, dx] = soil_depth(bx, bz)
+            predictors = GrowthPredictors(
+                annual_rainfall=rainfall,
+                organic_carbon_content=organic_carbon,
+                slope=slope,
+                cover=cover,
+                soil_suborder=soil_suborder,
+                landform=landform,
+            )
+            texture = select_soil_texture(predictors)
+            soil_profiles[dz][dx] = sample_soil_profile(
+                texture,
+                world_seed,
+                bx,
+                terrain_h,
+                bz,
+                slope,
+            )
 
-            min_height = min(min_height, terrain_h)
             max_height = max(max_height, terrain_h)
 
     # Determine y-range of MapBlocks we need to generate
@@ -83,9 +112,7 @@ def generate_mapblock_column(
 
     for mb_y in range(mb_y_min, mb_y_max + 1):
         block_data = _generate_mapblock(
-            mb_y, base_bx, base_bz,
-            heights, biomes, top_blocks, sub_blocks, depths,
-            water_level,
+            mb_y, heights, soil_profiles, water_level
         )
         if block_data is not None:
             results.append((mb_y, block_data))
@@ -113,13 +140,8 @@ class MapBlockData:
 
 def _generate_mapblock(
     mb_y: int,
-    base_bx: int,
-    base_bz: int,
     heights: np.ndarray,
-    biomes: np.ndarray,
-    top_blocks: list[list[str]],
-    sub_blocks: list[list[str]],
-    depths: np.ndarray,
+    soil_profiles: list[list[list[str]]],
     water_level: int,
 ) -> MapBlockData | None:
     """Generate a single MapBlock at the given y-level."""
@@ -130,9 +152,8 @@ def _generate_mapblock(
     for dz in range(MAP_BLOCK_SIZE):
         for dx in range(MAP_BLOCK_SIZE):
             terrain_h = int(heights[dz, dx])
-            sdepth = int(depths[dz, dx])
-            top = top_blocks[dz][dx]
-            sub = sub_blocks[dz][dx]
+            soil_profile = soil_profiles[dz][dx]
+            soil_depth = len(soil_profile)
 
             for dy in range(MAP_BLOCK_SIZE):
                 world_y = base_by + dy
@@ -144,17 +165,13 @@ def _generate_mapblock(
                     # Water
                     block.set(dx, dy, dz, WATER)
                     has_content = True
-                elif world_y == terrain_h:
-                    # Surface block
-                    block.set(dx, dy, dz, top)
-                    has_content = True
-                elif world_y > terrain_h - sdepth:
-                    # Subsurface soil
-                    block.set(dx, dy, dz, sub)
-                    has_content = True
                 else:
-                    # Deep underground -> stone
-                    block.set(dx, dy, dz, STONE)
+                    depth = terrain_h - world_y
+                    if 0 <= depth < soil_depth:
+                        block.set(dx, dy, dz, soil_profile[depth])
+                    else:
+                        # Deep underground -> stone
+                        block.set(dx, dy, dz, STONE)
                     has_content = True
 
     if not has_content:

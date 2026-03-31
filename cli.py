@@ -249,6 +249,7 @@ def main():
     from earth2mt.data.elevation import ElevationSource
     from earth2mt.data.landcover import LandcoverSource
     from earth2mt.data.climate import ClimateSource
+    from earth2mt.data.soil import OrganicCarbonSource, SoilClassSource
     from earth2mt.terrain.surface import generate_mapblock_column
     from earth2mt.world.world_setup import create_world
     from earth2mt.world.world_db import WorldDB
@@ -279,6 +280,8 @@ def main():
     elevation_src = ElevationSource(args.cache_dir, args.scale)
     landcover_src = LandcoverSource(args.cache_dir, args.scale)
     climate_src = ClimateSource(args.cache_dir)
+    organic_carbon_src = OrganicCarbonSource(args.cache_dir, args.scale)
+    soil_class_src = SoilClassSource(args.cache_dir, args.scale)
 
     spawn_x, spawn_y, spawn_z = find_spawn_position(
         radius_blocks,
@@ -312,6 +315,7 @@ def main():
                 mapblocks = generate_mapblock_column(
                     mb_x, mb_z, coords,
                     elevation_src, landcover_src, climate_src,
+                    organic_carbon_src, soil_class_src, world_seed,
                 )
 
                 for mb_y, block_data in mapblocks:
