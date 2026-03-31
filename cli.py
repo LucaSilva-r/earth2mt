@@ -55,7 +55,7 @@ def find_spawn_position(
         cover = landcover_src.sample(coords, bx, bz)
         mean_temp, min_temp, rainfall = climate_src.sample(lat, lon)
         biome = classify_biome(elevation, cover, mean_temp, min_temp, rainfall)
-        terrain_y = int(round(elevation)) + SEA_LEVEL
+        terrain_y = coords.elevation_to_world_y(elevation, SEA_LEVEL)
 
         spawn_y = terrain_y + 1
         if fallback is None or spawn_y > fallback[1]:

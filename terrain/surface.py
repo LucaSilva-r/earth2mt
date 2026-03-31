@@ -56,8 +56,8 @@ def generate_mapblock_column(
             # Classify biome
             biome = classify_biome(elev, cover, mean_temp, min_temp, rainfall)
 
-            # Terrain height in blocks (elevation relative to sea level)
-            terrain_h = int(round(elev)) + SEA_LEVEL
+            # Terrain height in blocks, using the same meters-per-block scale on Y.
+            terrain_h = coords.elevation_to_world_y(elev, SEA_LEVEL)
             heights[dz, dx] = terrain_h
             biomes[dz, dx] = biome
 

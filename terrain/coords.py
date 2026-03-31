@@ -72,6 +72,14 @@ class CoordinateTransform:
 
         return bx, bz
 
+    def elevation_to_world_y(self, elevation_meters: float, sea_level: int = 0) -> int:
+        """Convert a real-world elevation in meters to a Luanti Y coordinate.
+
+        `self.scale` is expressed in meters per block, so it applies vertically
+        as well as horizontally. Sea level remains at the requested Y offset.
+        """
+        return int(round(elevation_meters / self.scale)) + sea_level
+
     def geo_to_tile_pixel(self, lat: float, lon: float, zoom: int) -> tuple[int, int, int, int]:
         """Convert (lat, lon) to (tile_x, tile_y, pixel_x, pixel_y) in the tile grid.
 
