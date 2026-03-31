@@ -38,6 +38,11 @@ def resolve_jobs(requested_jobs: int | None, total_columns: int) -> int:
     return max(1, min(jobs, total_columns))
 
 
+def block_bounds_for_radius(radius_blocks: int) -> tuple[int, int, int, int]:
+    """Return inclusive world block bounds for a centered square radius."""
+    return -radius_blocks, radius_blocks, -radius_blocks, radius_blocks
+
+
 def _mapblock_columns(
     mb_min_x: int,
     mb_max_x: int,
@@ -257,9 +262,9 @@ def find_spawn_position(
     return 0, SEA_LEVEL + 1, 0
 
 
-def compute_world_seed(lat: float, lon: float, radius_km: float, scale: float) -> int:
+def compute_world_seed(lat: float, lon: float, radius_blocks: int, scale: float) -> int:
     """Build a stable positive 63-bit seed from the generation parameters."""
-    seed_input = f"{lat:.12f}:{lon:.12f}:{radius_km:.6f}:{scale:.6f}"
+    seed_input = f"{lat:.12f}:{lon:.12f}:{radius_blocks:d}:{scale:.6f}"
     digest = hashlib.blake2b(seed_input.encode("ascii"), digest_size=8).digest()
     seed = int.from_bytes(digest, "big") & ((1 << 63) - 1)
     return seed or 1
@@ -349,9 +354,9 @@ def parse_args():
 
     parser.add_argument(
         "--radius",
-        type=float,
-        default=5.0,
-        help="Radius in km (default: 5.0)",
+        type=_positive_int,
+        default=5000,
+        help="Generation radius in Luanti blocks from the center (default: 5000)",
     )
     parser.add_argument(
         "--scale",
@@ -426,8 +431,9 @@ def main():
         lat, lon = args.coords
 
     print(f"Center: {lat:.4f}, {lon:.4f}")
-    print(f"Radius: {args.radius} km")
+    print(f"Radius: {args.radius} blocks")
     print(f"Scale: {args.scale} m/block")
+    print(f"Approximate geographic radius: {(args.radius * args.scale) / 1000.0:.3f} km")
     print(f"Output: {args.output}")
 
     # Check output path
@@ -451,11 +457,8 @@ def main():
     coords = CoordinateTransform(lat, lon, args.scale)
 
     # Calculate block bounds
-    radius_blocks = int((args.radius * 1000) / args.scale)
-    min_bx = -radius_blocks
-    max_bx = radius_blocks
-    min_bz = -radius_blocks
-    max_bz = radius_blocks
+    radius_blocks = args.radius
+    min_bx, max_bx, min_bz, max_bz = block_bounds_for_radius(radius_blocks)
 
     # MapBlock range
     mb_min_x = min_bx // MAP_BLOCK_SIZE
@@ -464,9 +467,12 @@ def main():
     mb_max_z = max_bz // MAP_BLOCK_SIZE
 
     total_columns = (mb_max_x - mb_min_x + 1) * (mb_max_z - mb_min_z + 1)
+    generated_width_blocks = (mb_max_x - mb_min_x + 1) * MAP_BLOCK_SIZE
+    generated_depth_blocks = (mb_max_z - mb_min_z + 1) * MAP_BLOCK_SIZE
     jobs = resolve_jobs(args.jobs, total_columns)
     print(f"Generating {total_columns} MapBlock columns "
           f"({mb_max_x - mb_min_x + 1} x {mb_max_z - mb_min_z + 1}) "
+          f"covering about {generated_width_blocks} x {generated_depth_blocks} blocks "
           f"using {jobs} worker{'s' if jobs != 1 else ''}...")
 
     # Initialize data sources
