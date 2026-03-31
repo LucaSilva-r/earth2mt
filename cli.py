@@ -132,7 +132,7 @@ def _generate_serialized_column(
         raise RuntimeError("Generation worker state was not initialized")
 
     from earth2mt.terrain.surface import generate_mapblock_column
-    from earth2mt.world.mapblock import serialize_mapblock
+    from earth2mt.world.mapblock import serialize_mapblock_column
 
     mb_x, mb_z = column
     mapblocks = generate_mapblock_column(
@@ -146,10 +146,7 @@ def _generate_serialized_column(
         _WORKER_SOIL_CLASS_SRC,
         _WORKER_WORLD_SEED,
     )
-    serialized = [
-        (mb_y, serialize_mapblock(block_data, mb_x, mb_y, mb_z))
-        for mb_y, block_data in mapblocks
-    ]
+    serialized = serialize_mapblock_column(mapblocks, mb_x, mb_z)
     return mb_x, mb_z, serialized
 
 
