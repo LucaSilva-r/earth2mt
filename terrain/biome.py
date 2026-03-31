@@ -14,8 +14,16 @@ def is_frozen(min_temp: float, mean_temp: float) -> bool:
     return min_temp < MIN_FREEZE_TEMP and mean_temp < MEAN_COLD_TEMP
 
 
-def is_cold(mean_temp: float) -> bool:
-    return mean_temp < MEAN_COLD_TEMP
+def has_frozen_cover(cover: Cover) -> bool:
+    return cover == Cover.PERMANENT_SNOW
+
+
+def is_effectively_frozen(cover: Cover, min_temp: float, mean_temp: float) -> bool:
+    return has_frozen_cover(cover) or is_frozen(min_temp, mean_temp)
+
+
+def is_cold(cover: Cover, min_temp: float, mean_temp: float) -> bool:
+    return mean_temp < MEAN_COLD_TEMP or is_effectively_frozen(cover, min_temp, mean_temp)
 
 
 def is_desert(rainfall: float) -> bool:
@@ -73,13 +81,14 @@ def classify_biome(
     landform = determine_landform(cover, elevation)
 
     if landform != Landform.LAND:
-        return _classify_water(landform, elevation, min_temp, mean_temp)
+        return _classify_water(landform, cover, elevation, min_temp, mean_temp)
 
     return _classify_land(cover, elevation, mean_temp, min_temp, rainfall)
 
 
 def _classify_water(
     landform: Landform,
+    cover: Cover,
     elevation: float,
     min_temp: float,
     mean_temp: float,
@@ -90,7 +99,7 @@ def _classify_water(
         return Biome.OCEAN
 
     # Lake or river
-    if is_frozen(min_temp, mean_temp):
+    if is_effectively_frozen(cover, min_temp, mean_temp):
         return Biome.FROZEN_RIVER
     return Biome.RIVER
 
@@ -104,12 +113,12 @@ def _classify_land(
 ) -> Biome:
     # Beach detection: low elevation near sea level, non-water
     if elevation >= -2 and elevation <= 3:
-        if is_frozen(min_temp, mean_temp):
+        if is_effectively_frozen(cover, min_temp, mean_temp):
             return Biome.COLD_BEACH
         return Biome.BEACH
 
     # Frozen biomes
-    if is_frozen(min_temp, mean_temp):
+    if is_effectively_frozen(cover, min_temp, mean_temp):
         return Biome.COLD_TAIGA if is_forested(cover) else Biome.ICE_PLAINS
 
     # Flooded areas
@@ -131,7 +140,7 @@ def _classify_land(
             return Biome.TAIGA
 
     # Non-specific selection
-    if is_cold(mean_temp):
+    if is_cold(cover, min_temp, mean_temp):
         return Biome.TAIGA
     elif is_dry(rainfall):
         return Biome.SAVANNA

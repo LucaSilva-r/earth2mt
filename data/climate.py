@@ -50,6 +50,30 @@ def _unpack_rainfall(packed: np.ndarray) -> np.ndarray:
     return RAIN_MIN + RAIN_RANGE * np.power(shifted / 255.0, RAIN_CURVE)
 
 
+def _sample_linear(field: np.ndarray, px: float, py: float) -> float:
+    sample_x = px - 0.5
+    sample_y = py - 0.5
+
+    origin_x = math.floor(sample_x)
+    origin_y = math.floor(sample_y)
+    frac_x = sample_x - origin_x
+    frac_y = sample_y - origin_y
+
+    x0 = max(0, min(origin_x, CLIMATE_WIDTH - 1))
+    x1 = max(0, min(origin_x + 1, CLIMATE_WIDTH - 1))
+    y0 = max(0, min(origin_y, CLIMATE_HEIGHT - 1))
+    y1 = max(0, min(origin_y + 1, CLIMATE_HEIGHT - 1))
+
+    v00 = float(field[y0, x0])
+    v10 = float(field[y0, x1])
+    v01 = float(field[y1, x0])
+    v11 = float(field[y1, x1])
+
+    vx0 = v00 + frac_x * (v10 - v00)
+    vx1 = v01 + frac_x * (v11 - v01)
+    return vx0 + frac_y * (vx1 - vx0)
+
+
 class ClimateSource:
     def __init__(self, cache_dir: str):
         self.cache_path = Path(cache_dir) / "climatic_variables.xz"
@@ -99,14 +123,14 @@ class ClimateSource:
         self._ensure_loaded()
 
         # Convert lat/lon to pixel coordinates
-        px = int(((lon + 180.0) / 360.0) * CLIMATE_WIDTH)
-        py = int(((90.0 - lat) / 180.0) * CLIMATE_HEIGHT)
+        px = ((lon + 180.0) / 360.0) * CLIMATE_WIDTH
+        py = ((90.0 - lat) / 180.0) * CLIMATE_HEIGHT
 
         if px < 0 or px >= CLIMATE_WIDTH or py < 0 or py >= CLIMATE_HEIGHT:
             return STANDARD_TEMPERATURE, STANDARD_TEMPERATURE, STANDARD_RAINFALL
 
         return (
-            float(self.mean_temperature[py, px]),
-            float(self.min_temperature[py, px]),
-            float(self.annual_rainfall[py, px]),
+            _sample_linear(self.mean_temperature, px, py),
+            _sample_linear(self.min_temperature, px, py),
+            _sample_linear(self.annual_rainfall, px, py),
         )

@@ -5,7 +5,8 @@ import numpy as np
 from earth2mt.config import (
     MAP_BLOCK_SIZE, NODES_PER_BLOCK,
     SEA_LEVEL, WORLD_FLOOR,
-    STONE, WATER, AIR,
+    STONE, WATER, AIR, SNOW_LAYER,
+    GRASS_BLOCK, GRASS_BLOCK_SNOW, PODZOL, PODZOL_SNOW,
     Biome, Landform,
 )
 from earth2mt.terrain.coords import CoordinateTransform
@@ -20,6 +21,48 @@ from earth2mt.data.elevation import ElevationSource
 from earth2mt.data.landcover import LandcoverSource
 from earth2mt.data.climate import ClimateSource
 from earth2mt.data.soil import OrganicCarbonSource, SoilClassSource
+
+BIOME_BASE_TEMPERATURES = {
+    Biome.DEEP_OCEAN: 0.5,
+    Biome.OCEAN: 0.5,
+    Biome.FROZEN_RIVER: 0.0,
+    Biome.RIVER: 0.5,
+    Biome.COLD_BEACH: 0.05,
+    Biome.BEACH: 0.8,
+    Biome.COLD_TAIGA: -0.5,
+    Biome.ICE_PLAINS: 0.0,
+    Biome.SWAMPLAND: 0.8,
+    Biome.JUNGLE: 0.95,
+    Biome.JUNGLE_EDGE: 0.95,
+    Biome.DESERT: 2.0,
+    Biome.TAIGA: 0.25,
+    Biome.SAVANNA: 1.2,
+    Biome.ROOFED_FOREST: 0.7,
+    Biome.FOREST: 0.7,
+    Biome.BIRCH_FOREST: 0.6,
+    Biome.PLAINS: 0.8,
+}
+
+SNOW_TEMPERATURE_THRESHOLD = 0.15
+
+
+def _surface_biome_temperature(biome: Biome, surface_y: int) -> float:
+    temperature = BIOME_BASE_TEMPERATURES.get(biome, 0.8)
+    if surface_y > 64:
+        temperature -= ((surface_y - 64) * 0.05) / 30.0
+    return temperature
+
+
+def _supports_surface_snow(biome: Biome, terrain_h: int) -> bool:
+    return _surface_biome_temperature(biome, terrain_h + 1) < SNOW_TEMPERATURE_THRESHOLD
+
+
+def _snowify_surface_block(block: str) -> str:
+    if block == GRASS_BLOCK:
+        return GRASS_BLOCK_SNOW
+    if block == PODZOL:
+        return PODZOL_SNOW
+    return block
 
 
 def generate_mapblock_column(
@@ -43,6 +86,7 @@ def generate_mapblock_column(
 
     # Per-column data arrays
     heights = np.zeros((MAP_BLOCK_SIZE, MAP_BLOCK_SIZE), dtype=np.int32)
+    snow_cover = np.zeros((MAP_BLOCK_SIZE, MAP_BLOCK_SIZE), dtype=np.bool_)
     soil_profiles = [[[] for _ in range(MAP_BLOCK_SIZE)] for _ in range(MAP_BLOCK_SIZE)]
 
     elevations = elevation_src.sample_region(
@@ -96,6 +140,9 @@ def generate_mapblock_column(
                 bz,
                 slope,
             )
+            snow_cover[dz, dx] = _supports_surface_snow(biome, terrain_h) and terrain_h >= SEA_LEVEL
+            if snow_cover[dz, dx] and soil_profiles[dz][dx]:
+                soil_profiles[dz][dx][0] = _snowify_surface_block(soil_profiles[dz][dx][0])
 
             max_height = max(max_height, terrain_h)
 
@@ -112,7 +159,7 @@ def generate_mapblock_column(
 
     for mb_y in range(mb_y_min, mb_y_max + 1):
         block_data = _generate_mapblock(
-            mb_y, heights, soil_profiles, water_level
+            mb_y, heights, snow_cover, soil_profiles, water_level
         )
         if block_data is not None:
             results.append((mb_y, block_data))
@@ -141,6 +188,7 @@ class MapBlockData:
 def _generate_mapblock(
     mb_y: int,
     heights: np.ndarray,
+    snow_cover: np.ndarray,
     soil_profiles: list[list[list[str]]],
     water_level: int,
 ) -> MapBlockData | None:
@@ -158,6 +206,10 @@ def _generate_mapblock(
             for dy in range(MAP_BLOCK_SIZE):
                 world_y = base_by + dy
 
+                if snow_cover[dz, dx] and world_y == terrain_h + 1:
+                    block.set(dx, dy, dz, SNOW_LAYER)
+                    has_content = True
+                    continue
                 if world_y > max(terrain_h, water_level):
                     # Above everything -> air
                     continue

@@ -41,13 +41,9 @@ def meters_per_pixel(zoom: int) -> float:
 
 
 def best_zoom_for_scale(scale: float, max_zoom: int) -> int:
-    """Pick the highest zoom level available (finest resolution).
-
-    The Terrarium tile server has a max resolution of ~27.5 m/pixel at zoom 6.
-    At 1 m/block scale, multiple blocks will map to the same pixel — that's expected.
-    We always want the finest available data.
-    """
-    return max_zoom
+    """Pick the Terrarium zoom level that best matches the world scale."""
+    zoom = math.log(EQUATOR_CIRCUMFERENCE / (2.0 * TILE_SIZE * scale), ZOOM_BASE)
+    return max(0, min(max_zoom, int(round(zoom))))
 
 
 class CoordinateTransform:

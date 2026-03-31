@@ -3,9 +3,14 @@
 import numpy as np
 
 from earth2mt.config import TILE_SIZE, Cover, cover_by_id
+from earth2mt.data.resampling import sample_voronoi_cell
 from earth2mt.data.tile_source import TileSource
 from earth2mt.data.raster_reader import read_raster
-from earth2mt.terrain.coords import CoordinateTransform, best_zoom_for_scale
+from earth2mt.terrain.coords import (
+    CoordinateTransform,
+    best_zoom_for_scale,
+    global_pixel_to_tile_pixel,
+)
 
 
 LANDCOVER_ENDPOINT = "landcover"
@@ -34,9 +39,16 @@ class LandcoverSource:
     def sample(self, coords: CoordinateTransform, bx: int, bz: int) -> Cover:
         """Get land cover type for a block coordinate."""
         lat, lon = coords.block_to_geo(bx, bz)
-        tile_x, tile_y, px, py = coords.geo_to_tile_pixel(lat, lon, self.zoom)
-        tile = self.get_tile(tile_x, tile_y)
-        return cover_by_id(int(tile[py, px]))
+        global_px, global_py = coords.geo_to_global_pixel(lat, lon, self.zoom)
+        return self._sample_global_pixel(global_px, global_py)
 
     def clear_cache(self):
         self._tile_cache.clear()
+
+    def _get_global_value(self, global_px: int, global_py: int) -> Cover:
+        tile_x, tile_y, px, py = global_pixel_to_tile_pixel(global_px, global_py, self.zoom)
+        tile = self.get_tile(tile_x, tile_y)
+        return cover_by_id(int(tile[py, px]))
+
+    def _sample_global_pixel(self, global_px: float, global_py: float) -> Cover:
+        return sample_voronoi_cell(global_px, global_py, self._get_global_value)
