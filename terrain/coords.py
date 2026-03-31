@@ -20,6 +20,22 @@ def global_height(zoom: int) -> float:
     return tile_count_y(zoom) * TILE_SIZE
 
 
+def global_pixel_to_tile_pixel(global_px: float, global_py: float, zoom: int) -> tuple[int, int, int, int]:
+    """Convert global pixel coordinates to (tile_x, tile_y, pixel_x, pixel_y)."""
+    max_px = global_width(zoom) - 1.0
+    max_py = global_height(zoom) - 1.0
+
+    global_px = max(0.0, min(global_px, max_px))
+    global_py = max(0.0, min(global_py, max_py))
+
+    tile_x = int(global_px // TILE_SIZE)
+    tile_y = int(global_py // TILE_SIZE)
+    pixel_x = int(global_px % TILE_SIZE)
+    pixel_y = int(global_py % TILE_SIZE)
+
+    return tile_x, tile_y, pixel_x, pixel_y
+
+
 def meters_per_pixel(zoom: int) -> float:
     return EQUATOR_CIRCUMFERENCE / global_width(zoom)
 
@@ -46,10 +62,11 @@ class CoordinateTransform:
         self.center_lon = center_lon
         self.scale = scale  # meters per block
 
-        # Meters per degree at the equator
-        self.meters_per_deg_lon = EQUATOR_CIRCUMFERENCE / 360.0
-        # Adjust for latitude (longitude degrees shrink toward poles)
-        self.meters_per_deg_lat = EQUATOR_CIRCUMFERENCE / 360.0  # approximate
+        center_lat_radians = math.radians(center_lat)
+        # Longitude degrees shrink toward the poles; use the local scale at the
+        # world center so east/west distances stay consistent for small regions.
+        self.meters_per_deg_lon = (EQUATOR_CIRCUMFERENCE * math.cos(center_lat_radians)) / 360.0
+        self.meters_per_deg_lat = EQUATOR_CIRCUMFERENCE / 360.0  # local approximation
 
     def block_to_geo(self, bx: int, bz: int) -> tuple[float, float]:
         """Convert block coordinates to (lat, lon)."""
@@ -80,6 +97,24 @@ class CoordinateTransform:
         """
         return int(round(elevation_meters / self.scale)) + sea_level
 
+    def geo_to_global_pixel(self, lat: float, lon: float, zoom: int) -> tuple[float, float]:
+        """Convert (lat, lon) to floating-point global pixel coordinates."""
+        tc_x = tile_count_x(zoom)
+        tc_y = tile_count_y(zoom)
+
+        norm_lon = (lon + 180.0) / 360.0
+        norm_lat = (90.0 - lat) / 180.0
+
+        global_px = norm_lon * tc_x * TILE_SIZE
+        global_py = norm_lat * tc_y * TILE_SIZE
+
+        max_px = global_width(zoom) - 1.0
+        max_py = global_height(zoom) - 1.0
+        global_px = max(0.0, min(global_px, max_px))
+        global_py = max(0.0, min(global_py, max_py))
+
+        return global_px, global_py
+
     def geo_to_tile_pixel(self, lat: float, lon: float, zoom: int) -> tuple[int, int, int, int]:
         """Convert (lat, lon) to (tile_x, tile_y, pixel_x, pixel_y) in the tile grid.
 
@@ -87,29 +122,8 @@ class CoordinateTransform:
         - tile_x: 0..tile_count_x-1, left (lon=-180) to right (lon=+180)
         - tile_y: 0..tile_count_y-1, top (lat=+90) to bottom (lat=-90)
         """
-        tc_x = tile_count_x(zoom)
-        tc_y = tile_count_y(zoom)
-
-        # Normalize longitude to 0..360, then to pixel x
-        norm_lon = (lon + 180.0) / 360.0  # 0..1
-        global_px = norm_lon * tc_x * TILE_SIZE
-
-        # Normalize latitude to 0..1 (90 -> 0, -90 -> 1)
-        norm_lat = (90.0 - lat) / 180.0  # 0..1
-        global_py = norm_lat * tc_y * TILE_SIZE
-
-        tile_x = int(global_px // TILE_SIZE)
-        tile_y = int(global_py // TILE_SIZE)
-        pixel_x = int(global_px % TILE_SIZE)
-        pixel_y = int(global_py % TILE_SIZE)
-
-        # Clamp
-        tile_x = max(0, min(tile_x, int(tc_x) - 1))
-        tile_y = max(0, min(tile_y, int(tc_y) - 1))
-        pixel_x = max(0, min(pixel_x, TILE_SIZE - 1))
-        pixel_y = max(0, min(pixel_y, TILE_SIZE - 1))
-
-        return tile_x, tile_y, pixel_x, pixel_y
+        global_px, global_py = self.geo_to_global_pixel(lat, lon, zoom)
+        return global_pixel_to_tile_pixel(global_px, global_py, zoom)
 
     def block_to_tile_pixel(self, bx: int, bz: int, zoom: int) -> tuple[int, int, int, int]:
         """Convert block coordinates to tile + pixel coordinates."""
