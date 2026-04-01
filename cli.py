@@ -123,6 +123,7 @@ def _init_generation_worker(
     center_lon: float,
     scale: float,
     height_multiplier: float,
+    projection: str,
     world_seed: int,
 ):
     """Initialize per-process generation state when spawning workers."""
@@ -136,7 +137,13 @@ def _init_generation_worker(
     from earth2mt.terrain.coords import CoordinateTransform
 
     _set_generation_worker_state(
-        CoordinateTransform(center_lat, center_lon, scale, height_multiplier),
+        CoordinateTransform(
+            center_lat,
+            center_lon,
+            scale,
+            height_multiplier,
+            projection=projection,
+        ),
         ElevationSource(cache_dir, scale),
         LandcoverSource(cache_dir, scale),
         ClimateSource(cache_dir),
@@ -303,10 +310,12 @@ def compute_world_seed(
     radius_blocks: int,
     scale: float,
     height_multiplier: float,
+    projection: str = "auto",
 ) -> int:
     """Build a stable positive 63-bit seed from the generation parameters."""
     seed_input = (
-        f"{lat:.12f}:{lon:.12f}:{radius_blocks:d}:{scale:.6f}:{height_multiplier:.6f}"
+        f"{lat:.12f}:{lon:.12f}:{radius_blocks:d}:{scale:.6f}:"
+        f"{height_multiplier:.6f}:{projection}"
     )
     digest = hashlib.blake2b(seed_input.encode("ascii"), digest_size=8).digest()
     seed = int.from_bytes(digest, "big") & ((1 << 63) - 1)
@@ -414,6 +423,15 @@ def parse_args():
         help="Artificial multiplier for elevation on the Y axis (default: 1.0)",
     )
     parser.add_argument(
+        "--projection",
+        choices=("auto", "legacy", "europe-lcc"),
+        default="auto",
+        help=(
+            "Coordinate projection mode (default: auto). "
+            "Auto uses the Europe LCC projection for European centers."
+        ),
+    )
+    parser.add_argument(
         "--output", "-o",
         type=str,
         required=True,
@@ -485,13 +503,16 @@ def main():
     else:
         lat, lon = args.coords
 
-    print(f"Center: {lat:.4f}, {lon:.4f}")
-    print(f"Radius: {args.radius} blocks")
-    print(f"Scale: {args.scale} m/block")
-    print(f"Height multiplier: {args.height_multiplier}x")
-    print(f"Approximate geographic radius: {(args.radius * args.scale) / 1000.0:.3f} km")
-    print(f"Progress interval: {args.progress_interval:.1f}s")
-    print(f"Output: {args.output}")
+    from earth2mt.terrain.coords import CoordinateTransform
+
+    # Validate the coordinate transform before touching an existing output world.
+    coords = CoordinateTransform(
+        lat,
+        lon,
+        args.scale,
+        args.height_multiplier,
+        projection=args.projection,
+    )
 
     # Check output path
     if os.path.exists(os.path.join(args.output, "map.sqlite")):
@@ -501,7 +522,6 @@ def main():
             sys.exit(0)
         reset_output_world(args.output)
 
-    from earth2mt.terrain.coords import CoordinateTransform
     from earth2mt.data.elevation import ElevationSource
     from earth2mt.data.landcover import LandcoverSource
     from earth2mt.data.climate import ClimateSource
@@ -510,8 +530,14 @@ def main():
     from earth2mt.world.world_db import WorldDB
     from earth2mt.config import MAP_BLOCK_SIZE
 
-    # Set up coordinate transform
-    coords = CoordinateTransform(lat, lon, args.scale, args.height_multiplier)
+    print(f"Center: {lat:.4f}, {lon:.4f}")
+    print(f"Radius: {args.radius} blocks")
+    print(f"Scale: {args.scale} m/block")
+    print(f"Height multiplier: {args.height_multiplier}x")
+    print(f"Projection: {coords.projection} (requested: {args.projection})")
+    print(f"Approximate geographic radius: {(args.radius * args.scale) / 1000.0:.3f} km")
+    print(f"Progress interval: {args.progress_interval:.1f}s")
+    print(f"Output: {args.output}")
 
     # Calculate block bounds
     radius_blocks = args.radius
@@ -552,6 +578,7 @@ def main():
         args.radius,
         args.scale,
         args.height_multiplier,
+        coords.projection,
     )
     world_name = _sanitize_world_basename(args.output)
     launch_world = find_luanti_launch_world(args.output)
@@ -626,6 +653,7 @@ def main():
                     lon,
                     args.scale,
                     args.height_multiplier,
+                    coords.projection,
                     world_seed,
                 ),
             ) as executor:

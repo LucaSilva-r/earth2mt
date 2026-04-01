@@ -1,7 +1,56 @@
 """Coordinate transforms between geographic (lat/lon), block, and tile coordinates."""
 
 import math
+
 from earth2mt.config import EQUATOR_CIRCUMFERENCE, TILE_SIZE, ZOOM_BASE
+
+try:
+    from pyproj import CRS, Transformer
+except ImportError:
+    CRS = None
+    Transformer = None
+
+
+AUTO_PROJECTION = "auto"
+LEGACY_PROJECTION = "legacy"
+EUROPE_LCC_PROJECTION = "europe-lcc"
+
+EUROPE_LCC_BOUNDS = {
+    "min_lat": 24.0,
+    "max_lat": 72.0,
+    "min_lon": -35.0,
+    "max_lon": 45.0,
+}
+EUROPE_LCC_EPSG = 3034
+
+
+def _projection_requires_pyproj(projection: str) -> bool:
+    return projection == EUROPE_LCC_PROJECTION
+
+
+def _is_europe_lcc_candidate(center_lat: float, center_lon: float) -> bool:
+    return (
+        EUROPE_LCC_BOUNDS["min_lat"] <= center_lat <= EUROPE_LCC_BOUNDS["max_lat"]
+        and EUROPE_LCC_BOUNDS["min_lon"] <= center_lon <= EUROPE_LCC_BOUNDS["max_lon"]
+    )
+
+
+def _resolve_projection(center_lat: float, center_lon: float, projection: str) -> str:
+    if projection == AUTO_PROJECTION:
+        if _is_europe_lcc_candidate(center_lat, center_lon):
+            return EUROPE_LCC_PROJECTION
+        return LEGACY_PROJECTION
+    if projection in {LEGACY_PROJECTION, EUROPE_LCC_PROJECTION}:
+        return projection
+    raise ValueError(f"Unknown projection mode: {projection}")
+
+
+def _require_pyproj(projection: str):
+    if Transformer is None and _projection_requires_pyproj(projection):
+        raise RuntimeError(
+            "Projection "
+            f"{projection!r} requires pyproj. Install earth2mt requirements to enable it."
+        )
 
 
 def tile_count_x(zoom: int) -> float:
@@ -59,17 +108,47 @@ class CoordinateTransform:
         center_lon: float,
         scale: float,
         height_multiplier: float = 1.0,
+        projection: str = AUTO_PROJECTION,
     ):
         self.center_lat = center_lat
         self.center_lon = center_lon
         self.scale = scale  # meters per block
         self.height_multiplier = height_multiplier
+        self.requested_projection = projection
+        self.projection = _resolve_projection(center_lat, center_lon, projection)
 
-        center_lat_radians = math.radians(center_lat)
-        # Longitude degrees shrink toward the poles; use the local scale at the
-        # world center so east/west distances stay consistent for small regions.
-        self.meters_per_deg_lon = (EQUATOR_CIRCUMFERENCE * math.cos(center_lat_radians)) / 360.0
-        self.meters_per_deg_lat = EQUATOR_CIRCUMFERENCE / 360.0  # local approximation
+        self._geo_to_projected = None
+        self._projected_to_geo = None
+        self.center_projected_x = None
+        self.center_projected_y = None
+
+        if self.projection == LEGACY_PROJECTION:
+            center_lat_radians = math.radians(center_lat)
+            # Longitude degrees shrink toward the poles; use the local scale at the
+            # world center so east/west distances stay consistent for small regions.
+            self.meters_per_deg_lon = (EQUATOR_CIRCUMFERENCE * math.cos(center_lat_radians)) / 360.0
+            self.meters_per_deg_lat = EQUATOR_CIRCUMFERENCE / 360.0  # local approximation
+        elif self.projection == EUROPE_LCC_PROJECTION:
+            _require_pyproj(self.projection)
+
+            wgs84 = CRS.from_epsg(4326)
+            europe_lcc = CRS.from_epsg(EUROPE_LCC_EPSG)
+            self._geo_to_projected = Transformer.from_crs(
+                wgs84,
+                europe_lcc,
+                always_xy=True,
+            )
+            self._projected_to_geo = Transformer.from_crs(
+                europe_lcc,
+                wgs84,
+                always_xy=True,
+            )
+            self.center_projected_x, self.center_projected_y = self._geo_to_projected.transform(
+                center_lon,
+                center_lat,
+            )
+        else:
+            raise AssertionError(f"Unhandled projection mode: {self.projection}")
 
     def block_to_geo(self, bx: int, bz: int) -> tuple[float, float]:
         """Convert block coordinates to (lat, lon)."""
@@ -77,19 +156,28 @@ class CoordinateTransform:
         east_meters = bx * self.scale
         south_meters = bz * self.scale
 
-        lon = self.center_lon + east_meters / self.meters_per_deg_lon
-        lat = self.center_lat - south_meters / self.meters_per_deg_lat
+        if self.projection == LEGACY_PROJECTION:
+            lon = self.center_lon + east_meters / self.meters_per_deg_lon
+            lat = self.center_lat - south_meters / self.meters_per_deg_lat
+            return lat, lon
 
+        projected_x = self.center_projected_x + east_meters
+        projected_y = self.center_projected_y - south_meters
+        lon, lat = self._projected_to_geo.transform(projected_x, projected_y)
         return lat, lon
 
     def geo_to_block(self, lat: float, lon: float) -> tuple[int, int]:
         """Convert (lat, lon) to block coordinates."""
-        east_meters = (lon - self.center_lon) * self.meters_per_deg_lon
-        south_meters = (self.center_lat - lat) * self.meters_per_deg_lat
+        if self.projection == LEGACY_PROJECTION:
+            east_meters = (lon - self.center_lon) * self.meters_per_deg_lon
+            south_meters = (self.center_lat - lat) * self.meters_per_deg_lat
+        else:
+            projected_x, projected_y = self._geo_to_projected.transform(lon, lat)
+            east_meters = projected_x - self.center_projected_x
+            south_meters = self.center_projected_y - projected_y
 
         bx = int(round(east_meters / self.scale))
         bz = int(round(south_meters / self.scale))
-
         return bx, bz
 
     def elevation_to_world_y(self, elevation_meters: float, sea_level: int = 0) -> int:
