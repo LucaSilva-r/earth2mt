@@ -28,6 +28,14 @@ def _positive_int(raw_value: str) -> int:
     return value
 
 
+def _non_negative_int(raw_value: str) -> int:
+    """argparse type that only accepts integers >= 0."""
+    value = int(raw_value)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return value
+
+
 def _non_negative_float(raw_value: str) -> float:
     """argparse type that only accepts floats >= 0."""
     value = float(raw_value)
@@ -123,6 +131,7 @@ def _init_generation_worker(
     center_lon: float,
     scale: float,
     height_multiplier: float,
+    smoothing_radius: int,
     projection: str,
     world_seed: int,
 ):
@@ -131,7 +140,6 @@ def _init_generation_worker(
         return
 
     from earth2mt.data.climate import ClimateSource
-    from earth2mt.data.elevation import ElevationSource
     from earth2mt.data.landcover import LandcoverSource
     from earth2mt.data.soil import OrganicCarbonSource, SoilClassSource
     from earth2mt.terrain.coords import CoordinateTransform
@@ -144,7 +152,7 @@ def _init_generation_worker(
             height_multiplier,
             projection=projection,
         ),
-        ElevationSource(cache_dir, scale),
+        _build_elevation_source(cache_dir, scale, smoothing_radius),
         LandcoverSource(cache_dir, scale),
         ClimateSource(cache_dir),
         OrganicCarbonSource(cache_dir, scale),
@@ -243,6 +251,16 @@ def _should_print_progress(
     return (now - last_update_time) >= progress_interval
 
 
+def _build_elevation_source(cache_dir: str, scale: float, smoothing_radius: int):
+    """Create the elevation source, optionally wrapping it with smoothing."""
+    from earth2mt.data.elevation import ElevationSource, SmoothedElevationSource
+
+    source = ElevationSource(cache_dir, scale)
+    if smoothing_radius > 0:
+        return SmoothedElevationSource(source, smoothing_radius)
+    return source
+
+
 def _spiral_offsets(max_radius: int):
     """Yield (x, z) offsets from the center in expanding square rings."""
     yield 0, 0
@@ -311,12 +329,15 @@ def compute_world_seed(
     scale: float,
     height_multiplier: float,
     projection: str = "auto",
+    smoothing_radius: int = 0,
 ) -> int:
     """Build a stable positive 63-bit seed from the generation parameters."""
     seed_input = (
         f"{lat:.12f}:{lon:.12f}:{radius_blocks:d}:{scale:.6f}:"
         f"{height_multiplier:.6f}:{projection}"
     )
+    if smoothing_radius > 0:
+        seed_input += f":smooth={smoothing_radius:d}"
     digest = hashlib.blake2b(seed_input.encode("ascii"), digest_size=8).digest()
     seed = int.from_bytes(digest, "big") & ((1 << 63) - 1)
     return seed or 1
@@ -423,6 +444,15 @@ def parse_args():
         help="Artificial multiplier for elevation on the Y axis (default: 1.0)",
     )
     parser.add_argument(
+        "--smoothing-radius",
+        type=_non_negative_int,
+        default=0,
+        help=(
+            "Apply Gaussian smoothing to elevation over this many blocks "
+            "(default: 0, disabled)"
+        ),
+    )
+    parser.add_argument(
         "--projection",
         choices=("auto", "legacy", "europe-lcc"),
         default="auto",
@@ -522,7 +552,6 @@ def main():
             sys.exit(0)
         reset_output_world(args.output)
 
-    from earth2mt.data.elevation import ElevationSource
     from earth2mt.data.landcover import LandcoverSource
     from earth2mt.data.climate import ClimateSource
     from earth2mt.data.soil import OrganicCarbonSource, SoilClassSource
@@ -534,6 +563,10 @@ def main():
     print(f"Radius: {args.radius} blocks")
     print(f"Scale: {args.scale} m/block")
     print(f"Height multiplier: {args.height_multiplier}x")
+    if args.smoothing_radius > 0:
+        print(f"Smoothing: Gaussian radius {args.smoothing_radius} block(s)")
+    else:
+        print("Smoothing: off")
     print(f"Projection: {coords.projection} (requested: {args.projection})")
     print(f"Approximate geographic radius: {(args.radius * args.scale) / 1000.0:.3f} km")
     print(f"Progress interval: {args.progress_interval:.1f}s")
@@ -559,7 +592,11 @@ def main():
           f"using {jobs} worker{'s' if jobs != 1 else ''}...")
 
     # Initialize data sources
-    elevation_src = ElevationSource(args.cache_dir, args.scale)
+    elevation_src = _build_elevation_source(
+        args.cache_dir,
+        args.scale,
+        args.smoothing_radius,
+    )
     landcover_src = LandcoverSource(args.cache_dir, args.scale)
     climate_src = ClimateSource(args.cache_dir)
     organic_carbon_src = OrganicCarbonSource(args.cache_dir, args.scale)
@@ -579,6 +616,7 @@ def main():
         args.scale,
         args.height_multiplier,
         coords.projection,
+        args.smoothing_radius,
     )
     world_name = _sanitize_world_basename(args.output)
     launch_world = find_luanti_launch_world(args.output)
@@ -653,6 +691,7 @@ def main():
                     lon,
                     args.scale,
                     args.height_multiplier,
+                    args.smoothing_radius,
                     coords.projection,
                     world_seed,
                 ),

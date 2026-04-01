@@ -51,6 +51,53 @@ def _interpolate_1d(mode: str, values: list[float], x: float) -> float:
     )
 
 
+def _gaussian_kernel_1d(radius: int) -> np.ndarray:
+    """Build a normalized 1D Gaussian kernel for the requested radius."""
+    if radius <= 0:
+        return np.array([1.0], dtype=np.float32)
+
+    sigma = max(radius / 2.0, 0.5)
+    offsets = np.arange(-radius, radius + 1, dtype=np.float32)
+    kernel = np.exp(-(offsets ** 2) / (2.0 * sigma * sigma))
+    kernel /= np.sum(kernel)
+    return kernel.astype(np.float32)
+
+
+def _convolve_axis(values: np.ndarray, kernel: np.ndarray, axis: int) -> np.ndarray:
+    """Apply a 1D kernel along one axis using edge padding."""
+    radius = len(kernel) // 2
+    if radius == 0:
+        return values.astype(np.float32, copy=True)
+
+    if axis == 0:
+        pad_width = ((radius, radius), (0, 0))
+        target_length = values.shape[0]
+    else:
+        pad_width = ((0, 0), (radius, radius))
+        target_length = values.shape[1]
+
+    padded = np.pad(values, pad_width, mode="edge")
+    result = np.zeros(values.shape, dtype=np.float32)
+
+    for index, weight in enumerate(kernel):
+        if axis == 0:
+            result += padded[index:index + target_length, :] * weight
+        else:
+            result += padded[:, index:index + target_length] * weight
+
+    return result
+
+
+def smooth_elevation_region(elevations: np.ndarray, radius: int) -> np.ndarray:
+    """Blur an elevation raster with a separable Gaussian kernel."""
+    if radius <= 0:
+        return elevations.astype(np.float32, copy=True)
+
+    kernel = _gaussian_kernel_1d(radius)
+    blurred = _convolve_axis(elevations.astype(np.float32, copy=False), kernel, axis=1)
+    return _convolve_axis(blurred, kernel, axis=0)
+
+
 class ElevationSource:
     def __init__(self, cache_dir: str, scale: float):
         self.tile_source = TileSource(cache_dir)
@@ -127,3 +174,43 @@ class ElevationSource:
             columns.append(_interpolate_1d(self.interpolation, column, frac_y))
 
         return _interpolate_1d(self.interpolation, columns, frac_x)
+
+
+class SmoothedElevationSource:
+    """Optional Gaussian-smoothed view over another elevation source."""
+
+    def __init__(self, source, radius: int):
+        self.source = source
+        self.radius = radius
+
+    def sample(self, coords: CoordinateTransform, bx: int, bz: int) -> float:
+        return float(self.sample_region(coords, bx, bz, 1, 1)[0, 0])
+
+    def sample_region(
+        self,
+        coords: CoordinateTransform,
+        bx_start: int,
+        bz_start: int,
+        width: int,
+        height: int,
+    ) -> np.ndarray:
+        if self.radius <= 0:
+            return self.source.sample_region(coords, bx_start, bz_start, width, height)
+
+        expanded = self.source.sample_region(
+            coords,
+            bx_start - self.radius,
+            bz_start - self.radius,
+            width + self.radius * 2,
+            height + self.radius * 2,
+        )
+        smoothed = smooth_elevation_region(expanded, self.radius)
+        return smoothed[
+            self.radius:self.radius + height,
+            self.radius:self.radius + width,
+        ]
+
+    def clear_cache(self):
+        clear_cache = getattr(self.source, "clear_cache", None)
+        if clear_cache is not None:
+            clear_cache()
