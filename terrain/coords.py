@@ -99,7 +99,7 @@ class CoordinateTransform:
     """Converts between geographic coordinates, block coordinates, and tile pixel coordinates.
 
     Block coordinate (0, 0) corresponds to (center_lat, center_lon).
-    In Luanti: +X = east, +Z = south (matching Terrarium's convention).
+    In Luanti: +X = east, +Z = north.
     """
 
     def __init__(
@@ -152,17 +152,17 @@ class CoordinateTransform:
 
     def block_to_geo(self, bx: int, bz: int) -> tuple[float, float]:
         """Convert block coordinates to (lat, lon)."""
-        # +X = east, +Z = south
+        # +X = east, +Z = north
         east_meters = bx * self.scale
-        south_meters = bz * self.scale
+        north_meters = bz * self.scale
 
         if self.projection == LEGACY_PROJECTION:
             lon = self.center_lon + east_meters / self.meters_per_deg_lon
-            lat = self.center_lat - south_meters / self.meters_per_deg_lat
+            lat = self.center_lat + north_meters / self.meters_per_deg_lat
             return lat, lon
 
         projected_x = self.center_projected_x + east_meters
-        projected_y = self.center_projected_y - south_meters
+        projected_y = self.center_projected_y + north_meters
         lon, lat = self._projected_to_geo.transform(projected_x, projected_y)
         return lat, lon
 
@@ -170,14 +170,14 @@ class CoordinateTransform:
         """Convert (lat, lon) to block coordinates."""
         if self.projection == LEGACY_PROJECTION:
             east_meters = (lon - self.center_lon) * self.meters_per_deg_lon
-            south_meters = (self.center_lat - lat) * self.meters_per_deg_lat
+            north_meters = (lat - self.center_lat) * self.meters_per_deg_lat
         else:
             projected_x, projected_y = self._geo_to_projected.transform(lon, lat)
             east_meters = projected_x - self.center_projected_x
-            south_meters = self.center_projected_y - projected_y
+            north_meters = projected_y - self.center_projected_y
 
         bx = int(round(east_meters / self.scale))
-        bz = int(round(south_meters / self.scale))
+        bz = int(round(north_meters / self.scale))
         return bx, bz
 
     def elevation_to_world_y(self, elevation_meters: float, sea_level: int = 0) -> int:
