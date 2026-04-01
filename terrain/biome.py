@@ -55,12 +55,11 @@ def is_barren(cover: Cover) -> bool:
 
 
 def determine_landform(cover: Cover, elevation: float) -> Landform:
-    """Simplified landform determination from cover type and elevation."""
+    """Determine broad landform, favoring land-cover coastlines at coarse scale."""
     if cover == Cover.WATER:
-        if elevation < -10:
+        if elevation <= 0.0:
             return Landform.SEA
-        else:
-            return Landform.LAKE_OR_RIVER
+        return Landform.LAKE_OR_RIVER
     return Landform.LAND
 
 

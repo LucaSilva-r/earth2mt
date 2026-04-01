@@ -109,6 +109,22 @@ def _parse_chunk(chunk_data: bytes, result: np.ndarray, dtype, elem_size: int):
         filtered[src_y_start:src_y_end, src_x_start:src_x_end].astype(result.dtype)
 
 
+def _wrap_integer(value: int, dtype) -> int:
+    """Match Java primitive overflow semantics for raster reconstruction."""
+    dtype = np.dtype(dtype)
+    bits = dtype.itemsize * 8
+    mask = (1 << bits) - 1
+    value &= mask
+
+    if dtype.kind == "u":
+        return value
+
+    sign_bit = 1 << (bits - 1)
+    if value & sign_bit:
+        return value - (1 << bits)
+    return value
+
+
 def _apply_filter(raw: np.ndarray, filter_id: int) -> np.ndarray:
     """Apply PNG-style prediction filter to reconstruct original values.
 
@@ -118,7 +134,7 @@ def _apply_filter(raw: np.ndarray, filter_id: int) -> np.ndarray:
         return raw
 
     h, w = raw.shape
-    out = np.zeros_like(raw, dtype=np.int32)
+    out = np.zeros_like(raw)
 
     for y in range(h):
         for x in range(w):
@@ -128,19 +144,23 @@ def _apply_filter(raw: np.ndarray, filter_id: int) -> np.ndarray:
             c = int(out[y - 1, x - 1]) if (x > 0 and y > 0) else 0
 
             if filter_id == 1:  # LEFT
-                out[y, x] = val + a
+                reconstructed = val + a
             elif filter_id == 2:  # UP
-                out[y, x] = val + b
+                reconstructed = val + b
             elif filter_id == 3:  # AVERAGE
-                out[y, x] = val + (a + b) // 2
+                reconstructed = val + (a + b) // 2
             elif filter_id == 4:  # PAETH
                 p = a + b - c
                 da, db, dc = abs(a - p), abs(b - p), abs(c - p)
                 if da < db and da < dc:
-                    out[y, x] = val + a
+                    reconstructed = val + a
                 elif db < dc:
-                    out[y, x] = val + b
+                    reconstructed = val + b
                 else:
-                    out[y, x] = val + c
+                    reconstructed = val + c
+            else:
+                reconstructed = val
+
+            out[y, x] = _wrap_integer(reconstructed, raw.dtype)
 
     return out

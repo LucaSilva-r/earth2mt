@@ -7,7 +7,7 @@ from earth2mt.config import (
     SEA_LEVEL, WORLD_FLOOR,
     STONE, WATER, AIR, SNOW_LAYER,
     GRASS_BLOCK, GRASS_BLOCK_SNOW, PODZOL, PODZOL_SNOW,
-    Biome, Landform,
+    Biome, Cover, Landform,
 )
 from earth2mt.terrain.coords import CoordinateTransform
 from earth2mt.terrain.biome import classify_biome, determine_landform
@@ -65,6 +65,26 @@ def _snowify_surface_block(block: str) -> str:
     return block
 
 
+def _apply_landform_to_height(terrain_h: int, landform: Landform, sea_level: int) -> int:
+    """Match Terrarium's water height adjustment around sea level."""
+    if landform == Landform.SEA:
+        return min(terrain_h, sea_level - 1)
+    if landform == Landform.LAND and terrain_h < sea_level:
+        return sea_level
+    if landform == Landform.LAKE_OR_RIVER:
+        return terrain_h - 1
+    return terrain_h
+
+
+def _normalize_cover_for_landform(cover: Cover, landform: Landform) -> Cover:
+    """Mirror Terrarium's cover correction after landform generation."""
+    if landform in (Landform.SEA, Landform.LAKE_OR_RIVER):
+        return Cover.WATER
+    if cover == Cover.WATER:
+        return Cover.NO
+    return cover
+
+
 def generate_mapblock_column(
     mb_x: int,
     mb_z: int,
@@ -113,14 +133,16 @@ def generate_mapblock_column(
             soil_suborder = soil_class_src.sample(coords, bx, bz)
             slope = compute_slope(elevations, dx + 1, dz + 1, 1.0 / coords.scale)
 
+            landform = determine_landform(cover, elev)
+            terrain_h = coords.elevation_to_world_y(elev, SEA_LEVEL)
+            terrain_h = _apply_landform_to_height(terrain_h, landform, SEA_LEVEL)
+            cover = _normalize_cover_for_landform(cover, landform)
+
             # Classify biome
             biome = classify_biome(elev, cover, mean_temp, min_temp, rainfall)
-            landform = determine_landform(cover, elev)
             if biome in (Biome.BEACH, Biome.COLD_BEACH):
                 landform = Landform.BEACH
 
-            # Terrain height in blocks, with optional vertical exaggeration.
-            terrain_h = coords.elevation_to_world_y(elev, SEA_LEVEL)
             heights[dz, dx] = terrain_h
 
             predictors = GrowthPredictors(

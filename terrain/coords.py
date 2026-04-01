@@ -188,7 +188,10 @@ class CoordinateTransform:
         without changing horizontal distances. Sea level remains at the
         requested Y offset.
         """
-        return int(round((elevation_meters / self.scale) * self.height_multiplier)) + sea_level
+        scaled_height = (elevation_meters / self.scale) * self.height_multiplier
+        if elevation_meters >= 0.0:
+            return int(math.ceil(scaled_height)) + sea_level
+        return int(math.floor(scaled_height)) + sea_level
 
     def geo_to_global_pixel(self, lat: float, lon: float, zoom: int) -> tuple[float, float]:
         """Convert (lat, lon) to floating-point global pixel coordinates."""
