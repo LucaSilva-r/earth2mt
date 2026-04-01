@@ -53,10 +53,17 @@ class CoordinateTransform:
     In Luanti: +X = east, +Z = south (matching Terrarium's convention).
     """
 
-    def __init__(self, center_lat: float, center_lon: float, scale: float):
+    def __init__(
+        self,
+        center_lat: float,
+        center_lon: float,
+        scale: float,
+        height_multiplier: float = 1.0,
+    ):
         self.center_lat = center_lat
         self.center_lon = center_lon
         self.scale = scale  # meters per block
+        self.height_multiplier = height_multiplier
 
         center_lat_radians = math.radians(center_lat)
         # Longitude degrees shrink toward the poles; use the local scale at the
@@ -88,10 +95,12 @@ class CoordinateTransform:
     def elevation_to_world_y(self, elevation_meters: float, sea_level: int = 0) -> int:
         """Convert a real-world elevation in meters to a Luanti Y coordinate.
 
-        `self.scale` is expressed in meters per block, so it applies vertically
-        as well as horizontally. Sea level remains at the requested Y offset.
+        `self.scale` sets the baseline meters-per-block conversion while
+        `self.height_multiplier` exaggerates or compresses the vertical axis
+        without changing horizontal distances. Sea level remains at the
+        requested Y offset.
         """
-        return int(round(elevation_meters / self.scale)) + sea_level
+        return int(round((elevation_meters / self.scale) * self.height_multiplier)) + sea_level
 
     def geo_to_global_pixel(self, lat: float, lon: float, zoom: int) -> tuple[float, float]:
         """Convert (lat, lon) to floating-point global pixel coordinates."""

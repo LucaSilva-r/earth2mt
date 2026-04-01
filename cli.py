@@ -36,6 +36,14 @@ def _non_negative_float(raw_value: str) -> float:
     return value
 
 
+def _positive_float(raw_value: str) -> float:
+    """argparse type that only accepts floats > 0."""
+    value = float(raw_value)
+    if value <= 0.0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return value
+
+
 def resolve_jobs(requested_jobs: int | None, total_columns: int) -> int:
     """Choose a sane worker count for the current world size."""
     if total_columns <= 1:
@@ -114,6 +122,7 @@ def _init_generation_worker(
     center_lat: float,
     center_lon: float,
     scale: float,
+    height_multiplier: float,
     world_seed: int,
 ):
     """Initialize per-process generation state when spawning workers."""
@@ -127,7 +136,7 @@ def _init_generation_worker(
     from earth2mt.terrain.coords import CoordinateTransform
 
     _set_generation_worker_state(
-        CoordinateTransform(center_lat, center_lon, scale),
+        CoordinateTransform(center_lat, center_lon, scale, height_multiplier),
         ElevationSource(cache_dir, scale),
         LandcoverSource(cache_dir, scale),
         ClimateSource(cache_dir),
@@ -288,9 +297,17 @@ def find_spawn_position(
     return 0, SEA_LEVEL + 1, 0
 
 
-def compute_world_seed(lat: float, lon: float, radius_blocks: int, scale: float) -> int:
+def compute_world_seed(
+    lat: float,
+    lon: float,
+    radius_blocks: int,
+    scale: float,
+    height_multiplier: float,
+) -> int:
     """Build a stable positive 63-bit seed from the generation parameters."""
-    seed_input = f"{lat:.12f}:{lon:.12f}:{radius_blocks:d}:{scale:.6f}"
+    seed_input = (
+        f"{lat:.12f}:{lon:.12f}:{radius_blocks:d}:{scale:.6f}:{height_multiplier:.6f}"
+    )
     digest = hashlib.blake2b(seed_input.encode("ascii"), digest_size=8).digest()
     seed = int.from_bytes(digest, "big") & ((1 << 63) - 1)
     return seed or 1
@@ -386,9 +403,15 @@ def parse_args():
     )
     parser.add_argument(
         "--scale",
-        type=float,
+        type=_positive_float,
         default=1.0,
         help="Meters per block (default: 1.0)",
+    )
+    parser.add_argument(
+        "--height-multiplier",
+        type=_positive_float,
+        default=1.0,
+        help="Artificial multiplier for elevation on the Y axis (default: 1.0)",
     )
     parser.add_argument(
         "--output", "-o",
@@ -465,6 +488,7 @@ def main():
     print(f"Center: {lat:.4f}, {lon:.4f}")
     print(f"Radius: {args.radius} blocks")
     print(f"Scale: {args.scale} m/block")
+    print(f"Height multiplier: {args.height_multiplier}x")
     print(f"Approximate geographic radius: {(args.radius * args.scale) / 1000.0:.3f} km")
     print(f"Progress interval: {args.progress_interval:.1f}s")
     print(f"Output: {args.output}")
@@ -487,7 +511,7 @@ def main():
     from earth2mt.config import MAP_BLOCK_SIZE
 
     # Set up coordinate transform
-    coords = CoordinateTransform(lat, lon, args.scale)
+    coords = CoordinateTransform(lat, lon, args.scale, args.height_multiplier)
 
     # Calculate block bounds
     radius_blocks = args.radius
@@ -522,7 +546,13 @@ def main():
         landcover_src,
         climate_src,
     )
-    world_seed = compute_world_seed(lat, lon, args.radius, args.scale)
+    world_seed = compute_world_seed(
+        lat,
+        lon,
+        args.radius,
+        args.scale,
+        args.height_multiplier,
+    )
     world_name = _sanitize_world_basename(args.output)
     launch_world = find_luanti_launch_world(args.output)
     print(f"Spawn: ({spawn_x}, {spawn_y}, {spawn_z})")
@@ -590,7 +620,14 @@ def main():
                 max_workers=jobs,
                 mp_context=_preferred_mp_context(),
                 initializer=_init_generation_worker,
-                initargs=(args.cache_dir, lat, lon, args.scale, world_seed),
+                initargs=(
+                    args.cache_dir,
+                    lat,
+                    lon,
+                    args.scale,
+                    args.height_multiplier,
+                    world_seed,
+                ),
             ) as executor:
                 write_generated_columns(
                     _iter_parallel_generated_columns(executor, columns, jobs)

@@ -119,7 +119,7 @@ def generate_mapblock_column(
             if biome in (Biome.BEACH, Biome.COLD_BEACH):
                 landform = Landform.BEACH
 
-            # Terrain height in blocks, using the same meters-per-block scale on Y.
+            # Terrain height in blocks, with optional vertical exaggeration.
             terrain_h = coords.elevation_to_world_y(elev, SEA_LEVEL)
             heights[dz, dx] = terrain_h
 
