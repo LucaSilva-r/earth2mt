@@ -8,6 +8,7 @@ import struct
 import zlib
 
 from earth2mt.config import MAP_BLOCK_SIZE, NODES_PER_BLOCK, SER_FMT_VER, AIR, SNOW_LAYER
+from earth2mt.vegetation.generator import is_light_transparent_vegetation
 
 # Light value: day light in lower nibble, night light in upper nibble.
 # We do not place artificial lights while generating terrain, so the night bank
@@ -21,6 +22,10 @@ LIGHT_TRANSPARENT_NODES = frozenset({
     "mcl_core:water_source",
     "mcl_core:ice",
 })
+
+
+def _is_light_transparent(node_name: str) -> bool:
+    return node_name in LIGHT_TRANSPARENT_NODES or is_light_transparent_vegetation(node_name)
 
 
 def _node_index(x: int, y: int, z: int) -> int:
@@ -47,8 +52,8 @@ def _serialize_single_mapblock(
     # param1: light values (u8)
     node_buf.extend(light_bytes)
 
-    # param2: facedir etc. (u8, all 0 for terrain)
-    node_buf.extend(b"\x00" * NODES_PER_BLOCK)
+    # param2: facedir, palettes, and other per-node parameters.
+    node_buf.extend(bytes(getattr(block_data, "param2", [0] * NODES_PER_BLOCK)))
 
     buf = bytearray()
     buf.append(SER_FMT_VER)  # 25
@@ -63,6 +68,62 @@ def _serialize_single_mapblock(
     buf.append(2)  # params_width
     buf.extend(zlib.compress(bytes(node_buf)))
     return bytes(buf)
+
+
+def _write_string(buf: bytearray, value: str):
+    data = value.encode("utf-8")
+    buf.extend(struct.pack(">H", len(data)))
+    buf.extend(data)
+
+
+def _write_long_string(buf: bytearray, value: bytes | str):
+    data = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+    buf.extend(struct.pack(">I", len(data)))
+    buf.extend(data)
+
+
+def _serialize_node_metadata(block_data) -> bytes:
+    node_metadata = getattr(block_data, "node_metadata", {})
+    meta_buf = bytearray()
+    if not node_metadata:
+        meta_buf.append(0)
+        return zlib.compress(bytes(meta_buf))
+
+    meta_buf.append(1)
+    meta_buf.extend(struct.pack(">H", len(node_metadata)))
+    for idx in sorted(node_metadata):
+        metadata = node_metadata[idx]
+        meta_buf.extend(struct.pack(">H", idx))
+        meta_buf.extend(struct.pack(">I", len(metadata)))
+        for key in sorted(metadata):
+            _write_string(meta_buf, key)
+            _write_long_string(meta_buf, metadata[key])
+        meta_buf.extend(b"EndInventory\n")
+    return zlib.compress(bytes(meta_buf))
+
+
+def _append_common_trailers(block_bytes: bytearray, local_id_to_name: list[str], block_data):
+    block_bytes.extend(_serialize_node_metadata(block_data))
+
+    # Static objects
+    block_bytes.append(0)
+    block_bytes.extend(struct.pack(">H", 0))
+
+    # Timestamp
+    block_bytes.extend(struct.pack(">I", 0xFFFFFFFF))
+
+    # Name-ID mapping
+    block_bytes.append(0)
+    block_bytes.extend(struct.pack(">H", len(local_id_to_name)))
+    for local_id, name in enumerate(local_id_to_name):
+        name_bytes = name.encode("utf-8")
+        block_bytes.extend(struct.pack(">H", local_id))
+        block_bytes.extend(struct.pack(">H", len(name_bytes)))
+        block_bytes.extend(name_bytes)
+
+    # Node timers
+    block_bytes.append(2 + 4 + 4)
+    block_bytes.extend(struct.pack(">H", 0))
 
 
 def _compute_column_light_bytes(
@@ -87,7 +148,7 @@ def _compute_column_light_bytes(
                 for y in range(MAP_BLOCK_SIZE - 1, -1, -1):
                     idx = _node_index(x, y, z)
                     node_name = block_data.nodes[idx]
-                    is_transparent = node_name in LIGHT_TRANSPARENT_NODES
+                    is_transparent = _is_light_transparent(node_name)
 
                     light_buffer[idx] = DAYLIGHT_FULL if has_sunlight and is_transparent else LIGHT_NONE
 
@@ -122,31 +183,7 @@ def serialize_mapblock(block_data, mb_x: int, mb_y: int, mb_z: int) -> bytes:
     light_bytes = bytes(NODES_PER_BLOCK)
     buf = bytearray(_serialize_single_mapblock(block_data, mb_y, name_to_local_id, light_bytes))
 
-    # Node metadata (empty)
-    meta_buf = bytearray()
-    meta_buf.append(0)  # version = 0 means empty
-    buf.extend(zlib.compress(bytes(meta_buf)))
-
-    # Static objects
-    buf.append(0)  # version
-    buf.extend(struct.pack(">H", 0))  # count = 0
-
-    # Timestamp
-    buf.extend(struct.pack(">I", 0xFFFFFFFF))  # undefined
-
-    # Name-ID mapping
-    buf.append(0)  # version
-    buf.extend(struct.pack(">H", len(local_id_to_name)))
-    for local_id, name in enumerate(local_id_to_name):
-        name_bytes = name.encode("utf-8")
-        buf.extend(struct.pack(">H", local_id))
-        buf.extend(struct.pack(">H", len(name_bytes)))
-        buf.extend(name_bytes)
-
-    # Node timers
-    buf.append(2 + 4 + 4)  # timer data length = 10
-    buf.extend(struct.pack(">H", 0))  # count = 0
-
+    _append_common_trailers(buf, local_id_to_name, block_data)
     return bytes(buf)
 
 
@@ -178,21 +215,7 @@ def serialize_mapblock_column(
         for name, local_id in name_to_local_id.items():
             local_id_to_name[local_id] = name
 
-        meta_buf = bytearray()
-        meta_buf.append(0)
-        block_bytes.extend(zlib.compress(bytes(meta_buf)))
-        block_bytes.append(0)
-        block_bytes.extend(struct.pack(">H", 0))
-        block_bytes.extend(struct.pack(">I", 0xFFFFFFFF))
-        block_bytes.append(0)
-        block_bytes.extend(struct.pack(">H", len(local_id_to_name)))
-        for local_id, name in enumerate(local_id_to_name):
-            name_bytes = name.encode("utf-8")
-            block_bytes.extend(struct.pack(">H", local_id))
-            block_bytes.extend(struct.pack(">H", len(name_bytes)))
-            block_bytes.extend(name_bytes)
-        block_bytes.append(2 + 4 + 4)
-        block_bytes.extend(struct.pack(">H", 0))
+        _append_common_trailers(block_bytes, local_id_to_name, block_data)
         serialized.append((mb_y, bytes(block_bytes)))
 
     return serialized

@@ -11,12 +11,22 @@ from earth2mt.config import (
 )
 from earth2mt.terrain.coords import CoordinateTransform
 from earth2mt.terrain.biome import classify_biome, determine_landform
+from earth2mt.terrain.mineclonia_biome import (
+    MINECLONIA_BIOME_METADATA_KEY,
+    PALETTE_NODES,
+    classify_mineclonia_biome,
+    encode_mapblock_biome_index,
+    get_grass_palette_index,
+    get_leaves_palette_index,
+    get_mineclonia_biome_id,
+)
 from earth2mt.terrain.soil import (
     GrowthPredictors,
     compute_slope,
     sample_soil_profile,
     select_soil_texture,
 )
+from earth2mt.vegetation.generator import generate_vegetation_column
 from earth2mt.data.elevation import ElevationSource
 from earth2mt.data.landcover import LandcoverSource
 from earth2mt.data.climate import ClimateSource
@@ -108,6 +118,10 @@ def generate_mapblock_column(
     heights = np.zeros((MAP_BLOCK_SIZE, MAP_BLOCK_SIZE), dtype=np.int32)
     snow_cover = np.zeros((MAP_BLOCK_SIZE, MAP_BLOCK_SIZE), dtype=np.bool_)
     soil_profiles = [[[] for _ in range(MAP_BLOCK_SIZE)] for _ in range(MAP_BLOCK_SIZE)]
+    biome_names = [["Plains" for _ in range(MAP_BLOCK_SIZE)] for _ in range(MAP_BLOCK_SIZE)]
+    palette_indices = np.zeros((MAP_BLOCK_SIZE, MAP_BLOCK_SIZE), dtype=np.uint8)
+    leaves_palette_indices = np.zeros((MAP_BLOCK_SIZE, MAP_BLOCK_SIZE), dtype=np.uint8)
+    biome_ids = np.zeros((MAP_BLOCK_SIZE, MAP_BLOCK_SIZE), dtype=np.uint8)
 
     elevations = elevation_src.sample_region(
         coords,
@@ -166,22 +180,60 @@ def generate_mapblock_column(
             if snow_cover[dz, dx] and soil_profiles[dz][dx]:
                 soil_profiles[dz][dx][0] = _snowify_surface_block(soil_profiles[dz][dx][0])
 
+            surface_block = soil_profiles[dz][dx][0] if soil_profiles[dz][dx] else None
+            mineclonia_biome = classify_mineclonia_biome(
+                biome,
+                cover,
+                mean_temp,
+                min_temp,
+                texture,
+                bool(snow_cover[dz, dx]),
+                surface_block,
+            )
+            palette_indices[dz, dx] = get_grass_palette_index(mineclonia_biome)
+            leaves_palette_indices[dz, dx] = get_leaves_palette_index(mineclonia_biome)
+            biome_ids[dz, dx] = get_mineclonia_biome_id(mineclonia_biome)
+            biome_names[dz][dx] = mineclonia_biome
+
             max_height = max(max_height, terrain_h)
+
+    vegetation_nodes, vegetation_max_y = generate_vegetation_column(
+        base_bx,
+        base_bz,
+        heights,
+        snow_cover,
+        soil_profiles,
+        biome_names,
+        palette_indices,
+        leaves_palette_indices,
+        water_level=SEA_LEVEL,
+        world_seed=world_seed,
+    )
 
     # Determine y-range of MapBlocks we need to generate
     # We need blocks from WORLD_FLOOR up to max(max_height, SEA_LEVEL) + some margin
     water_level = SEA_LEVEL
     top_y = max(max_height, water_level) + 1  # +1 for the surface block
+    if vegetation_nodes:
+        top_y = max(top_y, vegetation_max_y)
     bottom_y = WORLD_FLOOR
 
     mb_y_min = bottom_y // MAP_BLOCK_SIZE
     mb_y_max = top_y // MAP_BLOCK_SIZE
 
     results = []
+    biome_index = encode_mapblock_biome_index(biome_ids)
 
     for mb_y in range(mb_y_min, mb_y_max + 1):
         block_data = _generate_mapblock(
-            mb_y, heights, snow_cover, soil_profiles, water_level
+            mb_y,
+            heights,
+            snow_cover,
+            soil_profiles,
+            palette_indices,
+            water_level,
+            biome_index,
+            vegetation_nodes,
         )
         if block_data is not None:
             results.append((mb_y, block_data))
@@ -191,14 +243,25 @@ def generate_mapblock_column(
 
 class MapBlockData:
     """Holds the node data for a single 16x16x16 MapBlock."""
-    __slots__ = ("nodes",)
+    __slots__ = ("nodes", "param2", "node_metadata")
 
     def __init__(self):
         # nodes[z * 256 + y * 16 + x] = block_name string
         self.nodes: list[str] = [AIR] * NODES_PER_BLOCK
+        self.param2: list[int] = [0] * NODES_PER_BLOCK
+        self.node_metadata: dict[int, dict[str, bytes | str]] = {}
 
     def set(self, x: int, y: int, z: int, block: str):
         self.nodes[z * MAP_BLOCK_SIZE * MAP_BLOCK_SIZE + y * MAP_BLOCK_SIZE + x] = block
+
+    def set_param2(self, x: int, y: int, z: int, value: int):
+        self.param2[z * MAP_BLOCK_SIZE * MAP_BLOCK_SIZE + y * MAP_BLOCK_SIZE + x] = value
+
+    def set_metadata(self, x: int, y: int, z: int, key: str, value: bytes | str):
+        idx = z * MAP_BLOCK_SIZE * MAP_BLOCK_SIZE + y * MAP_BLOCK_SIZE + x
+        if idx not in self.node_metadata:
+            self.node_metadata[idx] = {}
+        self.node_metadata[idx][key] = value
 
     def get(self, x: int, y: int, z: int) -> str:
         return self.nodes[z * MAP_BLOCK_SIZE * MAP_BLOCK_SIZE + y * MAP_BLOCK_SIZE + x]
@@ -212,7 +275,10 @@ def _generate_mapblock(
     heights: np.ndarray,
     snow_cover: np.ndarray,
     soil_profiles: list[list[list[str]]],
+    palette_indices: np.ndarray,
     water_level: int,
+    biome_index: bytes,
+    vegetation_nodes: dict[tuple[int, int, int], tuple[str, int]],
 ) -> MapBlockData | None:
     """Generate a single MapBlock at the given y-level."""
     block = MapBlockData()
@@ -227,6 +293,14 @@ def _generate_mapblock(
 
             for dy in range(MAP_BLOCK_SIZE):
                 world_y = base_by + dy
+                decoration = vegetation_nodes.get((dx, world_y, dz))
+                if decoration is not None:
+                    node_name, param2 = decoration
+                    block.set(dx, dy, dz, node_name)
+                    if param2:
+                        block.set_param2(dx, dy, dz, int(param2))
+                    has_content = True
+                    continue
 
                 if snow_cover[dz, dx] and world_y == terrain_h + 1:
                     block.set(dx, dy, dz, SNOW_LAYER)
@@ -246,9 +320,13 @@ def _generate_mapblock(
                     else:
                         # Deep underground -> stone
                         block.set(dx, dy, dz, STONE)
+                    node_name = block.get(dx, dy, dz)
+                    if node_name in PALETTE_NODES:
+                        block.set_param2(dx, dy, dz, int(palette_indices[dz, dx]))
                     has_content = True
 
     if not has_content:
         return None
 
+    block.set_metadata(0, 0, 0, MINECLONIA_BIOME_METADATA_KEY, biome_index)
     return block
